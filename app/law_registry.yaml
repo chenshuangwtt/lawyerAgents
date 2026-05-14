@@ -1,0 +1,127 @@
+# 法律领域注册表 — 新增法律只需在此添加条目，无需修改其他文件
+#
+# 字段说明：
+#   name:       领域名称（显示在前端标签、用于 LLM 分类）
+#   laws:       关联的法律名称列表（与 data/ 目录下的文件名一致，去掉日期后缀）
+#               空列表 [] 表示搜索全部法律（综合领域）
+#   keywords:   兜底关键词（LLM 分类异常时用关键词匹配）
+#   rule:       分类提示词中的规则描述（帮助 LLM 判断领域）
+#   color:      前端领域标签的 Tailwind CSS 类名
+
+domains:
+  - name: 劳动
+    laws:
+      - 中华人民共和国劳动合同法
+    keywords:
+      - 劳动
+      - 工资
+      - 社保
+      - 工伤
+      - 辞退
+      - 解雇
+      - 加班
+      - 休假
+      - 劳动合同
+      - 试用期
+      - 竞业
+    rule: 劳动合同、工资、社保等 → 劳动
+    color: bg-amber-50 text-amber-600 ring-amber-200
+
+  - name: 婚姻
+    laws:
+      - 中华人民共和国民法典
+    keywords:
+      - 婚姻
+      - 离婚
+      - 结婚
+      - 夫妻
+      - 财产分割
+      - 抚养
+      - 赡养
+      - 继承
+      - 收养
+      - 遗嘱
+      - 婚前
+    rule: 离婚、婚姻、继承、财产分割等 → 婚姻
+    color: bg-pink-50 text-pink-600 ring-pink-200
+
+  - name: 民事诉讼
+    laws:
+      - 中华人民共和国民事诉讼法
+    keywords:
+      - 诉讼
+      - 起诉
+      - 上诉
+      - 审判
+      - 执行
+      - 管辖
+      - 举证
+      - 判决
+      - 裁定
+      - 仲裁
+      - 调解
+    rule: 起诉、诉讼、仲裁等 → 民事诉讼
+    color: bg-violet-50 text-violet-600 ring-violet-200
+
+  - name: 刑事
+    laws:
+      - 中华人民共和国刑法
+    keywords:
+      - 犯罪
+      - 刑罚
+      - 判刑
+      - 刑事
+      - 盗窃
+      - 诈骗
+      - 抢劫
+      - 故意伤害
+      - 有期徒刑
+      - 缓刑
+      - 自首
+    rule: 犯罪、刑罚、盗窃、诈骗等 → 刑事
+    color: bg-red-50 text-red-600 ring-red-200
+
+  - name: 治安
+    laws:
+      - 中华人民共和国治安管理处罚法
+    keywords:
+      - 治安
+      - 处罚
+      - 拘留
+      - 罚款
+      - 扰乱
+      - 寻衅滋事
+      - 赌博
+      - 吸毒
+    rule: 治安处罚、拘留等 → 治安
+    color: bg-orange-50 text-orange-600 ring-orange-200
+
+  - name: 监察
+    laws:
+      - 中华人民共和国监察法
+    keywords:
+      - 监察
+      - 贪污
+      - 受贿
+      - 渎职
+      - 公职人员
+      - 政务处分
+    rule: 监察、贪污、公职人员等 → 监察
+    color: bg-slate-50 text-slate-600 ring-slate-200
+
+  - name: 国防
+    laws:
+      - 中华人民共和国国防法
+    keywords:
+      - 国防
+      - 军事
+      - 兵役
+      - 军人
+    rule: 国防、军事等 → 国防
+    color: bg-emerald-50 text-emerald-600 ring-emerald-200
+
+  - name: 综合
+    laws: []
+    keywords: []
+    rule: 涉及多个领域或无法确定 → 综合
+    color: bg-gray-50 text-gray-500 ring-gray-200

@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+/* Prose 排版微调（法律回答内容） */
+.prose h2 {
+  font-size: 0.9rem;
+  margin-top: 1.2em;
+  margin-bottom: 0.4em;
+  color: #1e293b;
+}
+.prose h3 {
+  font-size: 0.85rem;
+  margin-top: 1em;
+  margin-bottom: 0.3em;
+  color: #334155;
+}
+.prose p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  color: #475569;
+}
+.prose ul, .prose ol {
+  padding-left: 1.2em;
+}
+.prose li {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+.prose strong {
+  color: #1e293b;
+}
