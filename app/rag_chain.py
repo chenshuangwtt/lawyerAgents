@@ -81,6 +81,43 @@ QA_PROMPT = ChatPromptTemplate.from_messages([
 用户问题：{question}"""),
 ])
 
+# === Prompt: 多域法律顾问回答 ===
+QA_MULTI_DOMAIN_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """你是一位拥有多年实务经验的资深中国法律顾问。你的任务是根据提供的多个法律领域的条文，为用户提供准确、严谨且易于阅读的法律分析。
+
+【核心原则】
+- **重点突出**：使用**加粗**标注关键法律术语、罪名、量刑标准、时限等核心信息。
+- **证据闭环**：所有法律判断必须挂载法条出处，如（依据《劳动法》第二十一条）。若提供的法条资料中无相关依据，诚实说明，严禁编造法条。
+- **多领域分析**：用户问题涉及多个法律领域，你需要按领域分别论述，然后综合给出结论。在每个领域段落开头标注 **【{domain}】**。
+- **领域关联**：如果不同领域的法条之间有关联（如劳动法和社会保险法的交叉），明确指出并解释适用逻辑。
+- **语气**：专业但不冰冷，适当使用"您的情况可能涉及"、"建议您重点关注"等表达。
+
+【输出结构要求】请严格按以下格式输出：
+
+### ⚖️ 初步判定
+（结论先行。说明问题涉及哪些法律领域，用 1-2 句话给出**加粗的定性判断**。）
+
+### 🔍 法律依据与分析
+（按领域分段论述，每段标注领域名称，引用法条原文并结合案情解释。）
+
+### ⚠️ 实务建议与风险提示
+- 给出具体可操作的建议（维权途径、时限、证据保全等）
+- 列出关键风险变量
+- 如有例外情形或争议点，明确提示
+
+### 📜 免责声明
+（本回复由 AI 生成，仅供学习参考，不构成正式法律意见。法律事务复杂多变，请务必咨询持证律师以获取专业法律服务。）
+
+【重要】你始终是回答问题的法律顾问，不是审稿人。请直接回答当前用户的问题，不要对历史回答进行点评。"""),
+    MessagesPlaceholder("chat_history"),
+    ("human", """涉及的法律领域：{domains}
+
+相关法律条文：
+{context}
+
+用户问题：{question}"""),
+])
+
 # 按 session_id 存储对话历史
 _session_store: Dict[str, BaseChatMessageHistory] = {}
 
@@ -268,6 +305,76 @@ def _inject_definitions(
     return expanded_docs + definitions_added
 
 
+def _verify_citations(
+    sources: List[Dict[str, str]],
+    article_index: Dict,
+) -> List[Dict[str, str]]:
+    """
+    验证引用的法条条号是否真实存在，移除编造的条号。
+
+    Args:
+        sources: _format_sources() 返回的来源列表。
+        article_index: 条号索引 {law_name: {article_num(int): [chunks]}}。
+
+    Returns:
+        过滤后的来源列表（仅保留真实存在的条号）。
+    """
+    if not article_index or not sources:
+        return sources
+
+    verified_sources = []
+    removed_total = 0
+
+    for src in sources:
+        label = src["source"]
+        # 拆分：法律名 + 条号部分
+        parts = label.split(" ", 1)
+        if len(parts) < 2:
+            verified_sources.append(src)
+            continue
+
+        law_name = parts[0]
+        articles_str = parts[1]
+
+        # 提取条号列表
+        article_list = re.split(r"[、,]", articles_str)
+        article_list = [a.strip() for a in article_list if a.strip()]
+
+        # 检查该法律是否在索引中
+        if law_name not in article_index:
+            verified_sources.append(src)
+            continue
+
+        law_articles = article_index[law_name]
+        verified_articles = []
+        for art in article_list:
+            # 去掉尾部"等X条"标记来提取纯条号
+            clean_art = re.sub(r"\s*等\d+条$", "", art)
+            art_match = ARTICLE_PATTERN.search(clean_art)
+            if art_match:
+                art_num = _chinese_num_to_int(art_match.group(1))
+                if art_num > 0 and art_num in law_articles:
+                    verified_articles.append(clean_art)
+                else:
+                    removed_total += 1
+                    print(f"  [引用验证] 移除不存在的条号: {law_name} {clean_art}")
+            else:
+                # 无法解析的条号保留
+                verified_articles.append(art)
+
+        if verified_articles:
+            new_label = f"{law_name} {'、'.join(verified_articles)}"
+        else:
+            new_label = law_name
+
+        verified_sources.append({**src, "source": new_label})
+
+    if removed_total > 0:
+        print(f"  [引用验证] 共移除 {removed_total} 个不存在的条号")
+
+    return verified_sources
+
+
 def build_rag_chain(
     vectorstore: VectorStore,
     llm: BaseChatModel,
@@ -335,31 +442,26 @@ def build_rag_chain(
     return chain_with_history, retriever, llm, bm25_retriever, components
 
 
-def ask(
-    chain_with_history,
+def _retrieve_context(
     retriever,
     llm: BaseChatModel,
     question: str,
-    session_id: str = "default",
-    components: Optional[Dict] = None,
+    session_id: str,
+    components: Dict,
+    domain_override: Optional[str] = None,
+    law_names_override: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    向法律顾问提问（完整 7 步流水线）。
+    执行步骤 ①-⑤：分类 → 重写 → 混合检索 → Rerank → 上下文扩展。
 
     Args:
-        chain_with_history: 带记忆的 RAG 链。
-        retriever: 向量检索器。
-        llm: LLM 实例。
-        question: 用户问题。
-        session_id: 会话 ID。
-        components: 额外组件（bm25_retriever, article_index, reranker 等）。
+        domain_override: 预设领域（跳过分类步骤）。
+        law_names_override: 预设法律名称列表（跳过分类步骤）。
 
     Returns:
-        {"answer": str, "sources": [...], "domain": str, "risk_warning": str}
+        {"context_text": str, "domain": str, "question": str,
+         "sources": [...], "reranked_docs": [...], "article_index": {...}}
     """
-    if components is None:
-        components = {}
-
     bm25_retriever: ChineseBM25Retriever = components.get("bm25_retriever")
     article_index: Dict = components.get("article_index", {})
     reranker: Optional[CrossEncoderReranker] = components.get("reranker")
@@ -371,27 +473,30 @@ def ask(
     adjacent_range = components.get("adjacent_range", 1)
     enable_classification = components.get("enable_classification", True)
 
-    # ① 问题分类
-    domain = "综合"
-    law_names = []
-    if enable_classification:
+    # ① 问题分类（如有 override 则跳过）
+    if domain_override is not None:
+        domain = domain_override
+        law_names = law_names_override or []
+        print(f"  [分类-override] 领域={domain}，相关法律={law_names or '全部'}")
+    elif enable_classification:
         result = classify_question(llm, question)
         domain = result["domain"]
         law_names = result["law_names"]
         print(f"  [分类] 领域={domain}，相关法律={law_names or '全部'}")
+    else:
+        domain = "综合"
+        law_names = []
 
     # ② 多轮追问重写
     history_obj = _get_session_history(session_id)
     contextualized_q = _contextualize_query(llm, history_obj.messages, question)
 
     # ③ 混合检索（BM25 + 向量 + RRF）
-    # 构建 ChromaDB metadata 过滤条件
     if law_names and hasattr(retriever, 'vectorstore'):
         filtered_retriever = retriever.vectorstore.as_retriever(
             search_kwargs={"k": vector_top_k, "filter": {"source": {"$in": law_names}}}
         )
         vector_docs = filtered_retriever.invoke(contextualized_q)
-        # 额外获取司法解释等未注册文件的结果，防止被过滤掉
         all_vector_docs = retriever.invoke(contextualized_q)
         seen_contents = {d.page_content[:200] for d in vector_docs}
         for d in all_vector_docs:
@@ -406,7 +511,6 @@ def ask(
         bm25_results = bm25_retriever.retrieve(
             contextualized_q, k=bm25_top_k, law_filter=law_names if law_names else None
         )
-        # 同样补充未注册文件的 BM25 结果
         if law_names:
             all_bm25 = bm25_retriever.retrieve(contextualized_q, k=bm25_top_k, law_filter=None)
             seen_bm25 = {d.page_content[:200] for d, _ in bm25_results}
@@ -415,7 +519,6 @@ def ask(
                     bm25_results.append((d, s))
                     seen_bm25.add(d.page_content[:200])
 
-    # RRF 融合
     merged_docs = reciprocal_rank_fusion(
         bm25_results, vector_docs, k=rerank_top_k, rrf_constant=rrf_constant
     )
@@ -441,7 +544,6 @@ def ask(
             except ValueError:
                 continue
 
-            # 跨条引用扩展：解析 referenced_articles 中的条号
             ref_str = doc.metadata.get("referenced_articles", "")
             if ref_str:
                 for ref_art in ref_str.split(","):
@@ -463,31 +565,236 @@ def ask(
         if len(expanded_docs) > len(reranked_docs):
             print(f"  [上下文扩展] {len(reranked_docs)} → {len(expanded_docs)}")
 
-    # ⑤.5 定义聚合：将相关定义条文注入上下文
+    # ⑤.5 定义聚合
     all_chunks = components.get("chunks", [])
     if all_chunks:
         expanded_docs = _inject_definitions(expanded_docs, all_chunks)
 
-    # ⑥ 生成答案
+    # 构建上下文文本
     context_parts = []
     for i, doc in enumerate(expanded_docs, 1):
         source = doc.metadata.get("source", "未知法律")
         context_parts.append(f"[{i}] 来源：{source}\n{doc.page_content}")
     context_text = "\n\n".join(context_parts)
 
+    return {
+        "context_text": context_text,
+        "domain": domain,
+        "question": contextualized_q,
+        "reranked_docs": reranked_docs,
+        "article_index": article_index,
+    }
+
+
+def ask(
+    chain_with_history,
+    retriever,
+    llm: BaseChatModel,
+    question: str,
+    session_id: str = "default",
+    components: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    """
+    向法律顾问提问（完整 7 步流水线，非流式）。
+
+    Returns:
+        {"answer": str, "sources": [...], "domain": str, "risk_warning": str}
+    """
+    if components is None:
+        components = {}
+
+    ctx = _retrieve_context(retriever, llm, question, session_id, components)
+
+    # ⑥ 生成答案
     config = {"configurable": {"session_id": session_id}}
     response = chain_with_history.invoke(
-        {"question": contextualized_q, "context": context_text, "domain": domain},
+        {"question": ctx["question"], "context": ctx["context_text"], "domain": ctx["domain"]},
         config=config,
     )
 
-    # ⑦ 格式化来源 + 风险提示
+    # ⑦ 格式化来源 + 引用校验 + 风险提示
     answer_text = response.content if hasattr(response, "content") else str(response)
-    sources = _format_sources(reranked_docs, answer=answer_text)
+    sources = _format_sources(ctx["reranked_docs"], answer=answer_text)
+    sources = _verify_citations(sources, ctx["article_index"])
 
     return {
         "answer": answer_text,
         "sources": sources,
-        "domain": domain,
+        "domain": ctx["domain"],
         "risk_warning": RISK_WARNING,
+    }
+
+
+async def ask_stream(
+    chain_with_history,
+    retriever,
+    llm: BaseChatModel,
+    question: str,
+    session_id: str = "default",
+    components: Optional[Dict] = None,
+):
+    """
+    向法律顾问提问（流式 SSE 输出）。
+
+    支持多域协作：当 components 中 graph 可用且检测到跨域问题时，走 LangGraph 并行检索。
+
+    Yields:
+        {"type": "meta", "domain": str, "domains": list}            — 元信息
+        {"type": "substep", "step": str, "domain": str, ...}       — 进度（多域）
+        {"type": "token", "content": str}                          — 逐 token 输出
+        {"type": "done", "sources": [...], "risk_warning": str}    — 结束信号
+        {"type": "error", "message": str}                          — 错误
+    """
+    if components is None:
+        components = {}
+
+    try:
+        graph = components.get("graph")
+        multi_domain_enabled = components.get("multi_domain_enabled", False)
+
+        if graph and multi_domain_enabled:
+            # --- LangGraph 路径（单域 + 多域统一处理）---
+            async for event in _ask_stream_graph(
+                graph, chain_with_history, llm, question, session_id, components
+            ):
+                yield event
+        else:
+            # --- 原有快速路径 ---
+            ctx = _retrieve_context(retriever, llm, question, session_id, components)
+            yield {"type": "meta", "domain": ctx["domain"]}
+
+            config = {"configurable": {"session_id": session_id}}
+            stream_input = {
+                "question": ctx["question"],
+                "context": ctx["context_text"],
+                "domain": ctx["domain"],
+            }
+
+            answer_parts = []
+            async for chunk in chain_with_history.astream(stream_input, config=config):
+                content = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if content:
+                    answer_parts.append(content)
+                    yield {"type": "token", "content": content}
+
+            answer_text = "".join(answer_parts)
+            sources = _format_sources(ctx["reranked_docs"], answer=answer_text)
+            sources = _verify_citations(sources, ctx["article_index"])
+
+            yield {
+                "type": "done",
+                "sources": sources,
+                "risk_warning": RISK_WARNING,
+            }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        yield {"type": "error", "message": str(e)}
+
+
+async def _ask_stream_graph(
+    graph,
+    chain_with_history,
+    llm: BaseChatModel,
+    question: str,
+    session_id: str,
+    components: Dict,
+):
+    """LangGraph 路径的流式输出。"""
+    from langchain_core.messages import HumanMessage, AIMessage
+
+    graph_input = {"question": question, "session_id": session_id}
+    graph_result = None
+
+    # 运行图（检索阶段）
+    async for event in graph.astream(graph_input, stream_mode="updates"):
+        for node_name, update in event.items():
+            if node_name == "classify":
+                domains = update.get("domains", [])
+                is_multi = update.get("is_multi_domain", False)
+                domain_names = [d["domain"] for d in domains]
+                yield {
+                    "type": "meta",
+                    "domain": update.get("domain", "综合"),
+                    "domains": domain_names,
+                    "multi_domain": is_multi,
+                }
+            elif node_name == "generate_sub_questions":
+                sq = update.get("sub_questions", {})
+                for d, q in sq.items():
+                    yield {"type": "substep", "step": "sub_question", "domain": d, "question": q}
+            elif node_name == "retrieve_one_domain":
+                for ctx_item in update.get("retrieved_contexts", []):
+                    yield {"type": "substep", "step": "retrieve", "domain": ctx_item["domain"]}
+            elif node_name == "direct_retrieve":
+                graph_result = update
+            elif node_name == "merge_contexts":
+                graph_result = update
+
+    if graph_result is None:
+        # 获取最终状态
+        final_state = await graph.ainvoke(graph_input)
+        graph_result = final_state
+
+    # 从图结果中提取上下文
+    context_text = graph_result.get("context_text", "")
+    reranked_docs = graph_result.get("reranked_docs", [])
+    domain = graph_result.get("domain", "综合")
+    is_multi = graph_result.get("is_multi_domain", False)
+
+    # 选择 prompt
+    if is_multi:
+        domain_names_str = "、".join(
+            d["domain"] for d in graph_result.get("domains", [])
+        )
+        prompt = QA_MULTI_DOMAIN_PROMPT
+        stream_input = {
+            "question": question,
+            "context": context_text,
+            "domain": domain,
+            "domains": domain_names_str,
+        }
+    else:
+        prompt = QA_PROMPT
+        contextualized_q = _contextualize_query(
+            llm, _get_session_history(session_id).messages, question
+        )
+        stream_input = {
+            "question": contextualized_q,
+            "context": context_text,
+            "domain": domain,
+        }
+
+    # 流式生成答案
+    history_obj = _get_session_history(session_id)
+    messages = prompt.format_messages(
+        chat_history=history_obj.messages,
+        **stream_input,
+    )
+
+    answer_parts = []
+    async for chunk in llm.astream(messages):
+        content = chunk.content if hasattr(chunk, "content") else str(chunk)
+        if content:
+            answer_parts.append(content)
+            yield {"type": "token", "content": content}
+
+    # 保存对话历史
+    answer_text = "".join(answer_parts)
+    history_obj.add_messages([
+        HumanMessage(content=question),
+        AIMessage(content=answer_text),
+    ])
+
+    # 格式化来源 + 引用校验
+    article_index = components.get("article_index", {})
+    sources = _format_sources(reranked_docs, answer=answer_text)
+    sources = _verify_citations(sources, article_index)
+
+    yield {
+        "type": "done",
+        "sources": sources,
+        "risk_warning": RISK_WARNING,
+        "domain": domain,
+        "multi_domain": is_multi,
     }

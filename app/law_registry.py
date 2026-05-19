@@ -50,3 +50,21 @@ def load_domain_colors() -> Dict[str, str]:
     """领域 → CSS 类名映射，供前端使用。"""
     data = _load_yaml()
     return {d["name"]: d.get("color", "bg-gray-50 text-gray-500 ring-gray-200") for d in data["domains"]}
+
+
+def load_multi_classify_prompt_text() -> str:
+    """生成多域分类器 system prompt 文本。"""
+    data = _load_yaml()
+    domains = data["domains"]
+    names = "、".join(d["name"] for d in domains)
+    rules = "\n".join(f"- {d['rule']}" for d in domains if d.get("rule"))
+    return (
+        f"你是一个法律问题分类器。根据用户问题，判断涉及哪些法律领域。\n\n"
+        f"可选领域：{names}\n\n"
+        f"规则：\n"
+        f"- 如果问题只涉及一个领域，只输出该领域名称\n"
+        f"- 如果问题涉及多个领域，按相关度从高到低输出，用逗号分隔（如：劳动,税务）\n"
+        f"- 最多输出 3 个领域\n"
+        f"- 如果涉及多个领域或无法确定，输出\"综合\"\n"
+        f"{rules}"
+    )

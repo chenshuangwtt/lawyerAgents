@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, nextTick } from 'vue'
-import { sendMessage } from '../api.js'
+import { sendMessageStream } from '../api.js'
 import MessageBubble from './MessageBubble.vue'
 
 const props = defineProps({
@@ -11,7 +11,6 @@ const emit = defineEmits(['toggleSidebar', 'messageSent'])
 
 const input = ref('')
 const loading = ref(false)
-const pipelineStage = ref('')
 const atBottom = ref(true)
 const showBackBottom = ref(false)
 const textareaRef = ref(null)
@@ -61,7 +60,7 @@ watch(() => props.sessionId, () => {
   showBackBottom.value = false
 })
 
-// --- 发送消息 ---
+// --- 流式发送消息 ---
 async function onSend() {
   const q = input.value.trim()
   if (!q || loading.value) return
@@ -73,32 +72,68 @@ async function onSend() {
   scrollBottom()
   atBottom.value = true
 
-  loading.value = true
-  pipelineStage.value = '正在分析问题...'
-  try {
-    const t1 = setTimeout(() => pipelineStage.value = '正在检索法条...', 1500)
-    const t2 = setTimeout(() => pipelineStage.value = '正在生成回答...', 3000)
-    const res = await sendMessage(q, props.sessionId)
-    clearTimeout(t1); clearTimeout(t2)
+  // 预占 assistant 消息位
+  const msgIndex = props.messages.length
+  props.messages.push({
+    role: 'assistant',
+    content: '',
+    sources: [],
+    domain: '',
+    domains: [],
+    risk_warning: '',
+    time: new Date().toLocaleTimeString(),
+    streaming: true,
+    substeps: [],
+  })
 
-    props.messages.push({
-      role: 'assistant',
-      content: res.answer,
-      sources: res.sources || [],
-      domain: res.domain || '综合',
-      risk_warning: res.risk_warning || '',
-      time: new Date().toLocaleTimeString(),
+  loading.value = true
+  try {
+    await sendMessageStream(q, props.sessionId, {
+      onMeta(data) {
+        const msg = props.messages[msgIndex]
+        if (msg) {
+          msg.domain = data.domain || '综合'
+          msg.domains = data.domains || [data.domain || '综合']
+        }
+      },
+      onSubstep(data) {
+        const msg = props.messages[msgIndex]
+        if (msg && data.step === 'retrieve') {
+          msg.substeps.push(data.domain)
+        }
+      },
+      onToken(data) {
+        const msg = props.messages[msgIndex]
+        if (msg) {
+          msg.content += data.content
+          // 流式期间持续滚动
+          if (atBottom.value) scrollBottom()
+        }
+      },
+      onDone(data) {
+        const msg = props.messages[msgIndex]
+        if (msg) {
+          msg.sources = data.sources || []
+          msg.risk_warning = data.risk_warning || ''
+          msg.streaming = false
+        }
+      },
+      onError(message) {
+        const msg = props.messages[msgIndex]
+        if (msg) {
+          msg.content = '抱歉，服务暂时不可用，请稍后重试。'
+          msg.streaming = false
+        }
+      },
     })
   } catch {
-    props.messages.push({
-      role: 'assistant',
-      content: '抱歉，服务暂时不可用，请稍后重试。',
-      sources: [],
-      time: new Date().toLocaleTimeString(),
-    })
+    const msg = props.messages[msgIndex]
+    if (msg) {
+      msg.content = '抱歉，服务暂时不可用，请稍后重试。'
+      msg.streaming = false
+    }
   } finally {
     loading.value = false
-    pipelineStage.value = ''
     emit('messageSent')
   }
 }
@@ -187,21 +222,11 @@ watch(() => input.value, () => nextTick(adjustHeight))
           :content="msg.content"
           :sources="msg.sources"
           :domain="msg.domain"
+          :domains="msg.domains"
           :risk_warning="msg.risk_warning"
           :time="msg.time"
+          :streaming="msg.streaming"
         />
-
-        <!-- 加载态 -->
-        <div v-if="loading" class="mb-6">
-          <div class="flex items-center gap-3 px-4 py-3">
-            <div class="flex gap-1">
-              <span class="w-2 h-2 bg-blue-400/60 rounded-full animate-bounce" style="animation-delay:0ms"/>
-              <span class="w-2 h-2 bg-blue-400/60 rounded-full animate-bounce" style="animation-delay:150ms"/>
-              <span class="w-2 h-2 bg-blue-400/60 rounded-full animate-bounce" style="animation-delay:300ms"/>
-            </div>
-            <span class="text-xs text-gray-400">{{ pipelineStage || '思考中...' }}</span>
-          </div>
-        </div>
       </div>
     </div>
 

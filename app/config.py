@@ -147,6 +147,12 @@ class Settings:
         default_factory=lambda: os.getenv("ENABLE_CLASSIFICATION", "true").lower() == "true"
     )
 
+    # --- 多域协作 ---
+    # 多域分类最大领域数：跨域问题最多并行检索几个领域
+    multi_domain_max_domains: int = field(
+        default_factory=lambda: int(os.getenv("MULTI_DOMAIN_MAX_DOMAINS", "3"))
+    )
+
     # --- 记忆压缩 ---
     # 滑动窗口保留最近 N 轮对话（1 轮 = 用户提问 + 助手回答）
     #   调大 → 多轮追问连贯性更好，但 token 占用增加

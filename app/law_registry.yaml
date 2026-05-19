@@ -48,6 +48,7 @@ domains:
   - name: 民事诉讼
     laws:
       - 中华人民共和国民事诉讼法
+      - 中华人民共和国仲裁法
     keywords:
       - 诉讼
       - 起诉
@@ -66,6 +67,8 @@ domains:
   - name: 刑事
     laws:
       - 中华人民共和国刑法
+      - 中华人民共和国刑法修正案（十二）
+      - 中华人民共和国反电信网络诈骗法
     keywords:
       - 犯罪
       - 刑罚
@@ -119,6 +122,97 @@ domains:
       - 军人
     rule: 国防、军事等 → 国防
     color: bg-emerald-50 text-emerald-600 ring-emerald-200
+
+  - name: 网络与数据
+    laws:
+      - 中华人民共和国个人信息保护法
+    keywords:
+      - 个人信息
+      - 隐私
+      - 数据保护
+      - 信息安全
+      - 人脸识别
+      - 大数据
+      - 网络安全
+      - 数据泄露
+    rule: 个人信息、隐私保护、数据安全等 → 网络与数据
+    color: bg-cyan-50 text-cyan-600 ring-cyan-200
+
+  - name: 商事
+    laws:
+      - 中华人民共和国反不正当竞争法
+    keywords:
+      - 不正当竞争
+      - 商业秘密
+      - 垄断
+      - 虚假宣传
+      - 商标
+      - 知识产权
+      - 商业贿赂
+      - 仿冒
+    rule: 不正当竞争、商业秘密、垄断等 → 商事
+    color: bg-indigo-50 text-indigo-600 ring-indigo-200
+
+  - name: 税务
+    laws:
+      - 中华人民共和国增值税法
+    keywords:
+      - 增值税
+      - 税收
+      - 纳税
+      - 税务
+      - 发票
+      - 税率
+      - 税款
+      - 逃税
+      - 偷税
+    rule: 增值税、税收、纳税等 → 税务
+    color: bg-lime-50 text-lime-600 ring-lime-200
+
+  - name: 未成年人
+    laws:
+      - 中华人民共和国未成年人保护法
+    keywords:
+      - 未成年人
+      - 未成年
+      - 儿童
+      - 青少年
+      - 校园欺凌
+      - 监护
+      - 留守儿童
+      - 网络沉迷
+    rule: 未成年人保护、校园欺凌、监护等 → 未成年人
+    color: bg-sky-50 text-sky-600 ring-sky-200
+
+  - name: 行政
+    laws:
+      - 中华人民共和国行政复议法
+    keywords:
+      - 行政复议
+      - 行政处罚
+      - 行政诉讼
+      - 行政机关
+      - 行政许可
+      - 强制执行
+      - 政府信息公开
+      - 国家赔偿
+    rule: 行政复议、行政处罚、行政诉讼等 → 行政
+    color: bg-teal-50 text-teal-600 ring-teal-200
+
+  - name: 食药安全
+    laws:
+      - 中华人民共和国食品安全法
+    keywords:
+      - 食品安全
+      - 食品
+      - 药品
+      - 食品添加剂
+      - 食品卫生
+      - 假药
+      - 劣药
+      - 保健食品
+    rule: 食品安全、药品安全等 → 食药安全
+    color: bg-rose-50 text-rose-600 ring-rose-200
 
   - name: 综合
     laws: []

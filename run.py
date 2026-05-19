@@ -81,6 +81,15 @@ def main():
         memory_compression_debug=settings.memory_compression_debug,
     )
 
+    # 7.5 构建 LangGraph 多域协作图
+    from app.graph import set_graph_components, build_graph
+    set_graph_components(retr, llm, lightweight_llm, components,
+                         max_domains=settings.multi_domain_max_domains)
+    graph_app = build_graph()
+    components["graph"] = graph_app
+    components["multi_domain_enabled"] = True
+    print("  LangGraph 多域协作图构建完成")
+
     # 注入到 FastAPI app 模块
     api.rag_chain = chain
     api.retriever = retr

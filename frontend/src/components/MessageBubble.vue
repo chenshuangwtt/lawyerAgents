@@ -8,13 +8,25 @@ const props = defineProps({
   content: String,
   sources: { type: Array, default: () => [] },
   domain: { type: String, default: '' },
+  domains: { type: Array, default: () => [] },
   risk_warning: { type: String, default: '' },
   time: String,
+  streaming: { type: Boolean, default: false },
 })
 
 const html = computed(() => {
-  if (!props.content) return ''
-  return marked(props.content, { breaks: true })
+  if (!props.content && !props.streaming) return ''
+  let result = marked(props.content || '', { breaks: true })
+  if (props.streaming) {
+    // 把光标插入最后一个 </p> 内部，使其紧跟文字末尾
+    const lastClose = result.lastIndexOf('</p>')
+    if (lastClose !== -1) {
+      result = result.slice(0, lastClose) + '<span class="streaming-cursor"></span>' + result.slice(lastClose)
+    } else {
+      result += '<span class="streaming-cursor"></span>'
+    }
+  }
+  return result
 })
 
 const outOfScopeKeywords = ['超出法律咨询范围', '超出法律范围', '无法回答', '无法提供', '不属于法律问题']
@@ -24,6 +36,20 @@ const isOutOfScope = computed(() => {
 
 const domainColors = inject('domainColors', {})
 const domainColor = computed(() => domainColors[props.domain] || 'bg-gray-50 text-gray-500 ring-gray-200')
+
+// 多域标签列表：有 domains 数组时用它，否则回退到单个 domain
+const domainBadges = computed(() => {
+  if (props.domains && props.domains.length > 1) {
+    return props.domains.map(d => ({
+      name: d,
+      color: domainColors[d] || 'bg-gray-50 text-gray-500 ring-gray-200',
+    }))
+  }
+  if (props.domain) {
+    return [{ name: props.domain, color: domainColor.value }]
+  }
+  return []
+})
 </script>
 
 <template>
@@ -48,8 +74,17 @@ const domainColor = computed(() => domainColors[props.domain] || 'bg-gray-50 tex
           </svg>
         </div>
         <span class="text-xs font-semibold text-gray-600">法律顾问</span>
-        <span v-if="domain" class="text-xs px-2 py-0.5 rounded-md font-medium ring-1 ring-inset" :class="domainColor">
-          {{ domain }}
+        <span
+          v-for="badge in domainBadges"
+          :key="badge.name"
+          class="text-xs px-2 py-0.5 rounded-md font-medium ring-1 ring-inset"
+          :class="badge.color"
+        >
+          {{ badge.name }}
+        </span>
+        <span v-if="streaming" class="text-xs text-blue-400 flex items-center gap-1">
+          <span class="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse"></span>
+          生成中
         </span>
         <span class="text-xs text-gray-300 ml-auto">{{ time }}</span>
       </div>
@@ -74,3 +109,21 @@ const domainColor = computed(() => domainColors[props.domain] || 'bg-gray-50 tex
     </div>
   </div>
 </template>
+
+<style scoped>
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  background-color: #3b82f6;
+  border-radius: 1px;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  animation: cursor-blink 1s ease-in-out infinite;
+}
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+</style>

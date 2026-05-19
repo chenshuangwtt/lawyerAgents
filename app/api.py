@@ -2,7 +2,8 @@
 FastAPI 服务模块：提供法律顾问 REST API。
 
 端结点：
-  - POST   /api/chat              法律咨询
+  - POST   /api/chat              法律咨询（非流式）
+  - POST   /api/chat/stream       法律咨询（流式 SSE）
   - GET    /api/health             健康检查
   - GET    /api/sessions           会话列表（按 session 分组）
   - GET    /api/sessions/{id}      会话的全部对话
@@ -11,6 +12,7 @@ FastAPI 服务模块：提供法律顾问 REST API。
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 
@@ -170,6 +172,71 @@ async def chat(request: ChatRequest):
             status_code=500,
             detail=f"查询处理失败: {str(e)}",
         )
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """法律咨询流式接口：SSE 逐 token 返回回答。"""
+    if rag_chain is None or retriever is None or llm is None:
+        raise HTTPException(
+            status_code=503,
+            detail="RAG 链尚未初始化，请等待服务就绪后重试",
+        )
+
+    import json
+
+    async def event_generator():
+        from app.rag_chain import ask_stream
+        from app.chat_history import save_record
+
+        answer_text = ""
+        sources = []
+        risk_warning = ""
+
+        async for event in ask_stream(
+            rag_chain, retriever, llm,
+            request.question, request.session_id,
+            components=rag_components,
+        ):
+            event_type = event["type"]
+
+            if event_type == "meta":
+                meta_data = {"domain": event["domain"]}
+                if "domains" in event:
+                    meta_data["domains"] = event["domains"]
+                    meta_data["multi_domain"] = event.get("multi_domain", False)
+                yield f"event: meta\ndata: {json.dumps(meta_data, ensure_ascii=False)}\n\n"
+
+            elif event_type == "substep":
+                yield f"event: substep\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+            elif event_type == "token":
+                answer_text += event["content"]
+                yield f"event: token\ndata: {json.dumps({'content': event['content']}, ensure_ascii=False)}\n\n"
+
+            elif event_type == "done":
+                sources = event.get("sources", [])
+                risk_warning = event.get("risk_warning", "")
+                save_record(
+                    session_id=request.session_id,
+                    question=request.question,
+                    answer=answer_text,
+                    sources=sources,
+                )
+                done_data = {
+                    "sources": sources,
+                    "risk_warning": risk_warning,
+                }
+                if "domain" in event:
+                    done_data["domain"] = event["domain"]
+                if "multi_domain" in event:
+                    done_data["multi_domain"] = event["multi_domain"]
+                yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
+
+            elif event_type == "error":
+                yield f"event: error\ndata: {json.dumps({'message': event['message']}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/api/sessions", response_model=SessionListResponse)
