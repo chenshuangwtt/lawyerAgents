@@ -4,10 +4,10 @@
 功能概述：
   1. 加载 data 目录下所有 .docx 文件，支持并行读取。
   2. 自动提取法律文本的层级结构（编、章、节、条）。
-  3. 按“第X条”优先分割，保持每条语义完整。
+  3. 按"第X条"优先分割，保持每条语义完整。
   4. 合并过小的相邻 chunk，避免碎片化。
   5. 对超长条内部进行递归分割（段落 → 句子 → 固定长度），保留条号前缀。
-  6. 为每个 chunk 生成层级摘要（如“刑法 > 第一章 > 第二十三条”）。
+  6. 为每个 chunk 生成层级摘要（如"刑法 > 第一章 > 第二十三条"）。
   7. 记录前后条号索引，便于上下文检索扩展。
   8. 支持两种分割策略：'article'（按条，推荐）和 'fixed'（固定长度）。
 
@@ -18,6 +18,7 @@
 
 import re
 import os
+import json
 from pathlib import Path
 from typing import List, Tuple, Dict, Literal, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -29,14 +30,14 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ================== 常量与辅助函数 ==================
 
-# 中文数字映射（用于将“二十三”转为整数）
+# 中文数字映射（用于将"二十三"转为整数）
 _CN_DIGITS = {
     '零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
     '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
     '十': 10, '百': 100, '千': 1000, '万': 10000,
 }
 
-# 匹配“第X条”及变体（如“第X条之一”、“第X条之二”）
+# 匹配"第X条"及变体（如"第X条之一"、"第X条之二"）
 ARTICLE_PATTERN = re.compile(
     r'第([一二三四五六七八九十百千万0-9]+)条(?:之([一二三四五六七八九十]+))?'
 )
@@ -45,6 +46,29 @@ ARTICLE_PATTERN = re.compile(
 HIERARCHY_PATTERN = re.compile(
     r'^(第[一二三四五六七八九十百千万]+编|第[一二三四五六七八九十百千万]+章|第[一二三四五六七八九十百千万]+节)',
     re.MULTILINE
+)
+
+# 匹配子段落编号标记（款级别）：（一）（二）（三）等
+SUBPARA_PATTERN = re.compile(
+    r'(?=[\(（][一二三四五六七八九十百千]+[）\)])'
+)
+
+# 匹配处罚类型：判处/处以/处/判 + [可选：三年以下等修饰语] + 刑罚种类
+PENALTY_PATTERN = re.compile(
+    r'(?:判处|处以|处|判)'
+    r'(?:[十百千万零一二三四五六七八九\d]+年[以之]?(?:上|下|内)?|)?'
+    r'(无期徒刑|死刑|有期徒刑|拘役|管制|罚金|剥夺政治权利|没收财产)'
+)
+
+# 匹配定义条款：本法所称XX，是指 / 前款所称XX，是指
+DEFINITION_PATTERN = re.compile(
+    r'本[法条例]所称([一-鿿]{1,20})[，,]?\s*是指|'
+    r'前款所称([一-鿿]{1,20})[，,]?\s*是指'
+)
+
+# 匹配罪名引用：犯XX罪 / 构成XX罪
+CRIME_PATTERN = re.compile(
+    r'犯([一-鿿]{2,20}罪)|构成([一-鿿]{2,20}罪)'
 )
 
 
@@ -80,7 +104,7 @@ def _chinese_num_to_int(cn: str) -> int:
 
 def _extract_article_numbers(text: str) -> Tuple[List[str], List[int]]:
     """
-    从文本中提取所有“第X条”及变体的条号。
+    从文本中提取所有"第X条"及变体的条号。
     返回：(原文列表, 整数列表)
     例如: (['第二十三条', '第二十三条之一'], [23, 231])
     """
@@ -123,24 +147,138 @@ def _extract_hierarchy(text: str) -> List[Dict]:
     return hierarchy
 
 
+def _extract_entities(text: str, law_name: str = "") -> dict:
+    """
+    从 chunk 文本中提取法律实体（处罚类型、罪名、定义标记）。
+    返回 dict，可能包含：penalties, crimes, is_definition, defined_term
+    """
+    entities = {}
+
+    # 1. 处罚类型
+    penalties = list(set(PENALTY_PATTERN.findall(text)))
+    if penalties:
+        entities["penalties"] = penalties
+
+    # 2. 罪名（仅刑法相关文档）
+    if "刑法" in law_name:
+        crimes = set()
+        for m in CRIME_PATTERN.finditer(text):
+            crime = m.group(1) or m.group(2)
+            if crime:
+                crimes.add(crime)
+        if crimes:
+            entities["crimes"] = sorted(crimes)
+
+    # 3. 定义标记
+    m = DEFINITION_PATTERN.search(text)
+    if m:
+        term = m.group(1) or m.group(2)
+        if term:
+            entities["is_definition"] = True
+            entities["defined_term"] = term
+
+    return entities
+
+
 def _get_hierarchy_path(text: str, position: int, hierarchy_list: List[Dict]) -> List[str]:
     """
-    根据当前 chunk 在原文中的起始位置（近似），获取它所属的编/章/节路径。
-    实际实现中，由于按条分割时无法精确获取位置，可采用以下简化：
-      先对整个文档提取所有标题，然后在按条分割时记录每条所在的最近上级标题。
-    为简化示例，这里假设在 split_by_articles 中我们已经传入了包含层级信息的上下文。
-    下面给出一个占位实现：若 hierarchy_list 非空，则返回最后一个匹配的标题。
+    根据当前 chunk 在原文中的起始位置，获取完整的 编 > 章 > 节 路径。
+    用状态变量维护当前层级：遇到 编 清空章/节，遇到 章 清空节，遇到 节 覆盖。
     """
-    # 实际生产环境中，应在分割时动态记录。此处返回简单占位。
     if not hierarchy_list:
         return []
-    # 找到位置小于给定 position 的最后一个标题
-    last_title = None
-    for h in reversed(hierarchy_list):
-        if h['position'] < position:
-            last_title = h['title']
+    volume = chapter = section = None
+    for h in hierarchy_list:
+        if h['position'] >= position:
             break
-    return [last_title] if last_title else []
+        if h['level'] == '编':
+            volume, chapter, section = h['title'], None, None
+        elif h['level'] == '章':
+            chapter, section = h['title'], None
+        elif h['level'] == '节':
+            section = h['title']
+    path = []
+    if volume:
+        path.append(volume)
+    if chapter:
+        path.append(chapter)
+    if section:
+        path.append(section)
+    return path
+
+
+def _split_by_subparagraphs(
+    article_num: str,
+    body: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> List[Document]:
+    """
+    按子段落编号（如（一）（二））分割条文正文，尊重款级别的编号结构。
+    若无编号或单款仍超长，退化为 RecursiveCharacterTextSplitter。
+    """
+    parts = SUBPARA_PATTERN.split(body)
+    # parts[0] 是第一个编号前的引言部分（可能为空字符串）
+    # parts[1:] 每个以（一）等编号开头
+
+    prefix = f"{article_num}"
+    max_body = chunk_size - len(prefix) - 2
+
+    preamble = parts[0].strip() if parts[0].strip() else ""
+    subparas = []
+    for i, part in enumerate(parts[1:], 1):
+        part = part.strip()
+        if not part:
+            continue
+        # 提取编号标记
+        m = re.match(r'^[（(][一二三四五六七八九十百千]+[）)]', part)
+        label = m.group(0) if m else ""
+        # 引言附到第一个子段落前面
+        if i == 1 and preamble:
+            part = preamble + "\n" + part
+        subparas.append((label, part))
+
+    if not subparas:
+        # 无有效子段落，退化为递归分割
+        splitter = RecursiveCharacterTextSplitter(
+            separators=["\n\n", "\n", "。", "；", "，", " ", ""],
+            chunk_size=max_body,
+            chunk_overlap=chunk_overlap,
+        )
+        docs = []
+        for idx, chunk_body in enumerate(splitter.split_text(body)):
+            docs.append(Document(
+                page_content=f"{prefix}{chunk_body}",
+                metadata={"article": article_num, "sub_part": idx}
+            ))
+        return docs
+
+    docs = []
+    for idx, (label, text) in enumerate(subparas):
+        if len(text) <= max_body:
+            docs.append(Document(
+                page_content=f"{prefix}{text}",
+                metadata={"article": article_num, "subpara": label}
+            ))
+        else:
+            # 单个款仍超长，递归分割
+            splitter = RecursiveCharacterTextSplitter(
+                separators=["\n\n", "\n", "。", "；", "，", " ", ""],
+                chunk_size=max_body,
+                chunk_overlap=chunk_overlap,
+            )
+            sub_chunks = splitter.split_text(text)
+            for si, sc in enumerate(sub_chunks):
+                docs.append(Document(
+                    page_content=f"{prefix}{sc}",
+                    metadata={
+                        "article": article_num,
+                        "subpara": label,
+                        "sub_part": si,
+                        "total_sub_parts": len(sub_chunks),
+                    }
+                ))
+    return docs
 
 
 # ================== 核心分割函数 ==================
@@ -152,11 +290,11 @@ def _split_by_articles(
     hierarchy: Optional[List[Dict]] = None
 ) -> List[Document]:
     """
-    按“第X条”分割法律文本，保证每条独立。
+    按"第X条"分割法律文本，保证每条独立。
     超长条内部会进一步按段落→句子→固定长度分割，并保留条号前缀。
     """
     # 先用正则切割出每条及其内容
-    # 匹配从“第X条”到下一个“第X条”或文末
+    # 匹配从"第X条"到下一个"第X条"或文末
     pattern = re.compile(
         r'(第[一二三四五六七八九十百千万0-9]+条(?:之[一二三四五六七八九十]+)?)(.*?)(?=第[一二三四五六七八九十百千万0-9]+条(?:之[一二三四五六七八九十]+)?|$)',
         re.DOTALL
@@ -194,26 +332,14 @@ def _split_by_articles(
             )
             article_docs.append(doc)
         else:
-            # 超长条：对正文部分进行递归分割，保留条号前缀
-            inner_splitter = RecursiveCharacterTextSplitter(
-                separators=["\n\n", "\n", "。", "；", "，", " ", ""],
-                chunk_size=chunk_size - len(article_num) - 2,
-                chunk_overlap=chunk_overlap,
+            # 超长条：先按子段落编号（款）分割，保留条号前缀
+            subpara_docs = _split_by_subparagraphs(
+                article_num, article_body, chunk_size, chunk_overlap
             )
-            body_chunks = inner_splitter.split_text(article_body)
-            total = len(body_chunks)
-            for idx, chunk_body in enumerate(body_chunks):
-                doc = Document(
-                    page_content=f"{article_num}{chunk_body}",
-                    metadata={
-                        "article": article_num,
-                        "sub_part": idx,
-                        "total_sub_parts": total,
-                        "hierarchy_path": hierarchy_str,
-                        "start_pos": start_pos,
-                    }
-                )
-                article_docs.append(doc)
+            for d in subpara_docs:
+                d.metadata["hierarchy_path"] = hierarchy_str
+                d.metadata["start_pos"] = start_pos
+            article_docs.extend(subpara_docs)
     return article_docs
 
 
@@ -315,10 +441,11 @@ def _add_article_index(chunks: List[Document]) -> List[Document]:
 
 def _generate_summary(chunk: Document) -> str:
     """
-    生成该 chunk 的层级摘要，格式如：“刑法 > 第一章 > 第二十三条 - Part 1/2”
+    生成该 chunk 的层级摘要，格式如："刑法 > 第一章 > 第二十三条 - （一） - Part 1/2"
     """
     hierarchy = chunk.metadata.get("hierarchy_path", "")
     article = chunk.metadata.get("article", "")
+    subpara = chunk.metadata.get("subpara", "")
     sub = chunk.metadata.get("sub_part")
     total = chunk.metadata.get("total_sub_parts")
 
@@ -328,6 +455,8 @@ def _generate_summary(chunk: Document) -> str:
     if article:
         parts.append(article)
     base = " > ".join(parts) if parts else "未命名"
+    if subpara:
+        base += f" - {subpara}"
     if sub is not None and total and total > 1:
         return f"{base} - Part {sub+1}/{total}"
     return base
@@ -349,7 +478,7 @@ def load_documents(data_dir: str, parallel: bool = True) -> List[Document]:
     if not data_path.exists():
         raise FileNotFoundError(f"数据目录不存在: {data_dir}")
 
-    docx_files = sorted(data_path.glob("*.docx"))
+    docx_files = sorted(data_path.rglob("*.docx"))
     if not docx_files:
         raise FileNotFoundError(f"未找到 .docx 文件: {data_dir}")
 
@@ -418,14 +547,38 @@ def split_documents(
                 str_arts, int_arts = _extract_article_numbers(ac.page_content)
                 ac.metadata["article_numbers"] = ",".join(str_arts)
                 ac.metadata["article_numbers_int"] = ",".join(str(i) for i in int_arts)
+                # 拆分层级路径为独立字段（用于 metadata filter）
+                hp = ac.metadata.get("hierarchy_path", "")
+                parts = hp.split(" > ") if hp else []
+                # 按顺序：编 > 章 > 节
+                level_keys = {"编": "volume", "章": "chapter", "节": "section"}
+                for p in parts:
+                    for suffix, key in level_keys.items():
+                        if suffix in p:
+                            ac.metadata[key] = p
                 # 生成摘要
                 ac.metadata["summary"] = _generate_summary(ac)
+                # 提取法律实体（处罚类型、罪名、定义标记）
+                law_name = ac.metadata.get("source", "")
+                entities = _extract_entities(ac.page_content, law_name)
+                ac.metadata["entities"] = json.dumps(entities, ensure_ascii=False) if entities else ""
             final_chunks.extend(article_chunks)
 
         # 合并过小的相邻 chunk
         final_chunks = _merge_small_chunks(final_chunks, min_size=min_chunk_size, max_size=chunk_size + chunk_overlap)
         # 添加前后条索引
         final_chunks = _add_article_index(final_chunks)
+        # 提取跨条引用（在合并之后，基于最终 chunk 内容）
+        for ch in final_chunks:
+            own_article = ch.metadata.get("article", "")
+            if not own_article:
+                continue
+            text_refs = set()
+            for m in ARTICLE_PATTERN.finditer(ch.page_content):
+                ref_full = m.group(0)
+                if ref_full != own_article:
+                    text_refs.add(ref_full)
+            ch.metadata["referenced_articles"] = ",".join(sorted(text_refs)) if text_refs else ""
         # 更新摘要（合并后摘要可能改变，可重新生成，此处简化，保留原第一个 chunk 的摘要）
         for ch in final_chunks:
             if "summary" not in ch.metadata:
@@ -444,6 +597,9 @@ def split_documents(
             chunk.metadata["article_numbers"] = ",".join(str_arts)
             chunk.metadata["article_numbers_int"] = ",".join(str(i) for i in int_arts)
             chunk.metadata["summary"] = chunk.metadata.get("article", "未命名段落")
+            law_name = chunk.metadata.get("source", "")
+            entities = _extract_entities(chunk.page_content, law_name)
+            chunk.metadata["entities"] = json.dumps(entities, ensure_ascii=False) if entities else ""
 
     print(f"分割完成：{len(docs)} 个原始文档块 → {len(final_chunks)} 个 chunk")
     return final_chunks

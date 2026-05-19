@@ -7,3 +7,5 @@ chat_history.db
 *.pyc
 node_modules/
 frontend/dist/
+_*.py
+.claude/

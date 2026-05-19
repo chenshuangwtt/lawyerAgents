@@ -1,23 +1,23 @@
 # 法律顾问 Agent
 
-基于 RAG（检索增强生成）架构的中国法律智能咨询系统。加载 7 部法律文书构建知识库，通过混合检索 + Rerank 精排 + 多轮记忆，提供专业法律咨询。
+基于 RAG（检索增强生成）架构的中国法律智能咨询系统。加载法律全文 + 司法解释构建知识库，通过混合检索 + Rerank 精排 + 多轮记忆，提供专业法律咨询。
 
 ## 架构
 
 ```text
 用户提问
   ↓
-① 问题分类（劳动/婚姻/刑事/综合）
+① 问题分类（劳动/婚姻/刑事/综合等 8 个领域）
   ↓
 ② 多轮追问重写
   ↓
-③ 混合检索（BM25 + 向量，RRF 融合）
+③ 混合检索（BM25 + 向量，RRF 融合，司法解释补充）
   ↓
-④ Rerank 精排（bge-reranker-v2-m3）
+④ Rerank 精排（DashScope gte-rerank-v2）
   ↓
-⑤ 法条上下文扩展（前后条）
+⑤ 法条上下文扩展（前后条 + 跨条引用 + 定义注入）
   ↓
-⑥ DeepSeek 生成答案
+⑥ LLM 生成答案（Qwen / DeepSeek / OpenAI）
   ↓
 ⑦ 引用来源 + 风险提示
 ```
@@ -30,6 +30,12 @@ lawyerAgents/
 ├── .env                               # 环境变量（勿提交，参考 .env.example）
 ├── requirements.txt
 ├── data/                              # 法律文书（.docx）
+│   ├── 中华人民共和国民法典_20200528.docx
+│   ├── 中华人民共和国刑法_20201226.docx
+│   ├── ...（16 部法律）
+│   └── 司法解释/                      # 司法解释（500+ 条）
+│       ├── 最高人民法院关于审理劳动争议案件...
+│       └── ...
 │
 ├── app/                               # Python 后端包
 │   ├── config.py                      # 配置中心（.env → dataclass）
@@ -40,21 +46,24 @@ lawyerAgents/
 │   ├── vectorstore.py                 # ChromaDB 向量库（自动感知文件变更）
 │   ├── classifier.py                  # LLM 问题分类
 │   ├── hybrid_retriever.py            # BM25 检索器 + RRF 融合
-│   ├── reranker.py                    # CrossEncoder 精排（懒加载）
+│   ├── reranker.py                    # DashScope Rerank API
 │   ├── article_index.py               # 法条条号内存索引（前后条查找）
 │   ├── rag_chain.py                   # RAG 链（集成全流程）
 │   ├── chat_history.py                # SQLite 问答记录 + 会话置顶
 │   ├── memory_compression.py          # 记忆压缩（滑动窗口+摘要+Token裁剪）
 │   └── api.py                         # FastAPI REST 接口
 │
-└── frontend/                          # Vue 3 + TailwindCSS
-    └── src/
-        ├── App.vue                    # 根布局
-        └── components/
-            ├── ChatPanel.vue          # 对话区（含示例问题、流水线进度）
-            ├── MessageBubble.vue      # 消息气泡（领域标签、风险提示）
-            ├── Sidebar.vue            # 会话管理（新建、切换、删除）
-            └── SourceCard.vue         # 参考法条标签
+├── frontend/                          # Vue 3 + TailwindCSS 4
+│   └── src/
+│       ├── App.vue                    # 根布局
+│       └── components/
+│           ├── ChatPanel.vue          # 对话区（含示例问题、流水线进度）
+│           ├── MessageBubble.vue      # 消息气泡（领域标签、风险提示）
+│           ├── Sidebar.vue            # 会话管理（新建、切换、删除）
+│           └── SourceCard.vue         # 参考法条标签
+│
+└── scripts/
+    └── fetch_interpretations.py       # 司法解释爬虫（flk.npc.gov.cn）
 ```
 
 ## 快速开始
@@ -91,9 +100,9 @@ QWEN_RERANKER_MODEL=gte-rerank-v2
 python run.py
 ```
 
-首次运行：加载文档 → 分割 → 构建条号索引 → Embedding → 构建向量库。后续启动直接加载缓存。
+首次运行：加载文档 → 分割 → 构建条号索引 → Embedding → 构建向量库。后续启动直接加载缓存（data/ 目录文件变化时自动重建）。
 
-服务地址: `http://localhost:8000` | API 文档: `http://localhost:8000/docs`
+服务地址: `http://localhost:8080` | API 文档: `http://localhost:8080/docs`
 
 ### 启动前端
 
@@ -121,44 +130,59 @@ npm run dev
 
 ### 混合检索 + Rerank
 
-BM25 关键词检索与向量语义检索通过 RRF 融合，再经 CrossEncoder 精排，兼顾召回率和准确率。
+BM25 关键词检索与向量语义检索通过 RRF 融合，再经 DashScope gte-rerank-v2 精排。检索时自动补充司法解释等未注册文件的结果，避免被领域过滤排除。
 
 ### 问题分类
 
-LLM 自动识别问题所属法律领域（劳动/婚姻/刑事等），缩小检索范围，减少无关噪声。
+LLM 自动识别问题所属法律领域（劳动/婚姻/刑事/治安/监察/国防/民事诉讼/综合），缩小检索范围。
 
-### 前后条扩展
+### 法条上下文扩展
 
-检索到某条法律条文后，自动补充前一条和后一条作为上下文，帮助 LLM 理解条文的适用条件。
+检索到法条后自动补充前后条、跨条引用和相关定义条文，帮助 LLM 理解适用条件。
 
 ### Query 重写
 
-将追问（如"举个例子""那试用期呢"）结合对话历史重写为完整独立的法律问题，确保检索命中。
+将追问（如"举个例子""那试用期呢"）结合对话历史重写为完整独立的法律问题。
 
 ### 多轮记忆
 
-同一 `session_id` 共享对话上下文，支持连续追问。长对话自动三层压缩（滑动窗口 + 摘要 + Token 裁剪），防止上下文溢出。
+同一 `session_id` 共享对话上下文，支持连续追问。长对话自动三层压缩（滑动窗口 + 摘要 + Token 裁剪）。
 
-### 会话置顶
+### 结构化输出
 
-常用会话可置顶，置顶会话始终排在列表最前方。
-
-### 结构化法律输出
-
-回答自动按「初步判定 → 法律依据与分析 → 实务建议 → 风险提示」四段结构组织，便于快速获取关键信息。
+回答按「初步判定 → 法律依据与分析 → 实务建议 → 风险提示」四段结构组织。
 
 ## 知识库
 
-`data/` 目录存放法律全文（.docx），可从以下渠道获取：
+`data/` 目录存放法律全文和司法解释（.docx），支持递归扫描子目录。
 
-- [国家法律法规数据库](https://flk.npc.gov.cn)
-- [司法部法律法规数据库](http://search.chinalaw.gov.cn)
+数据来源：[国家法律法规数据库](https://flk.npc.gov.cn)
 
 ### 新增法律
 
-只需两步：
-
 1. 将 `.docx` 文件放入 `data/`（命名格式：`法律名称_日期.docx`）
-2. 编辑 `app/law_registry.yaml`，添加对应的领域条目（名称、关联法律、关键词、分类规则、前端颜色）
+2. 编辑 `app/law_registry.yaml`，添加对应的领域条目
 
-重启服务即可生效，系统会自动检测文件变更并重建向量库。
+重启服务自动生效（文件指纹变化触发向量库重建）。
+
+### 补充司法解释
+
+将 `.docx` 文件放入 `data/司法解释/`，无需修改注册表，重启服务即可。
+
+### 爬取司法解释
+
+```bash
+python scripts/fetch_interpretations.py          # 全量爬取
+python scripts/fetch_interpretations.py --limit 10  # 每类限 10 条测试
+```
+
+## 多 LLM 支持
+
+通过 `.env` 切换提供商，无需改代码：
+
+| 提供商 | LLM_PROVIDER | EMBEDDING_PROVIDER |
+| --- | --- | --- |
+| 阿里百炼（推荐） | `qwen` | `qwen` |
+| DeepSeek | `deepseek` | `deepseek` |
+| OpenAI | `openai` | `openai` |
+| 本地模型 | — | `local` |

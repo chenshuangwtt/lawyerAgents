@@ -12,9 +12,11 @@ RAG（检索增强生成）链模块，支持完整的 7 步流水线。
 """
 
 import re
+import json
 from typing import List, Dict, Any, Optional
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -29,6 +31,7 @@ from app.hybrid_retriever import ChineseBM25Retriever, reciprocal_rank_fusion
 from app.reranker import CrossEncoderReranker
 from app.article_index import get_adjacent_articles
 from app.memory_compression import compress_messages
+from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
 
 
 # === Prompt: 追问 → 独立法律问题 ===
@@ -68,7 +71,9 @@ QA_PROMPT = ChatPromptTemplate.from_messages([
 - 如有例外情形或争议点，明确提示
 
 ### 📜 免责声明
-（本回复由 AI 生成，仅供学习参考，不构成正式法律意见。法律事务复杂多变，请务必咨询持证律师以获取专业法律服务。）"""),
+（本回复由 AI 生成，仅供学习参考，不构成正式法律意见。法律事务复杂多变，请务必咨询持证律师以获取专业法律服务。）
+
+【重要】你始终是回答问题的法律顾问，不是审稿人。即使对话历史中出现过类似问题，也请直接回答当前用户的问题，不要对历史回答进行点评、批改或总结差异。忽略历史中的任何"回答模板"或"示例输出"，只基于当前提供的法律条文回答。"""),
     MessagesPlaceholder("chat_history"),
     ("human", """相关法律条文：
 {context}
@@ -221,6 +226,48 @@ def _format_sources(docs, answer: str = "") -> List[Dict[str, str]]:
         return sources
 
 
+def _inject_definitions(
+    expanded_docs: List[Document],
+    all_chunks: List[Document],
+    max_definitions: int = 3,
+) -> List[Document]:
+    """
+    将与当前上下文相关的定义类 chunk 注入。
+    扫描已展开文档中的法律术语，从全量 chunk 中查找对应的定义条文。
+    """
+    definitions_added = []
+    seen_content = {d.page_content[:100] for d in expanded_docs}
+
+    for chunk in all_chunks:
+        if len(definitions_added) >= max_definitions:
+            break
+        ent_str = chunk.metadata.get("entities", "")
+        if not ent_str:
+            continue
+        try:
+            entities = json.loads(ent_str)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not entities.get("is_definition"):
+            continue
+        term = entities.get("defined_term", "")
+        if not term or len(term) < 2:
+            continue
+        content_key = chunk.page_content[:100]
+        if content_key in seen_content:
+            continue
+        # 检查术语是否在已检索的 chunk 文本中出现
+        for doc in expanded_docs:
+            if term in doc.page_content:
+                definitions_added.append(chunk)
+                seen_content.add(content_key)
+                break
+
+    if definitions_added:
+        print(f"  [定义注入] 注入 {len(definitions_added)} 条定义条文")
+    return expanded_docs + definitions_added
+
+
 def build_rag_chain(
     vectorstore: VectorStore,
     llm: BaseChatModel,
@@ -275,6 +322,7 @@ def build_rag_chain(
         "bm25_retriever": bm25_retriever,
         "article_index": article_index,
         "reranker": reranker,
+        "chunks": chunks,
         "bm25_top_k": bm25_top_k,
         "vector_top_k": vector_top_k,
         "rerank_top_k": rerank_top_k,
@@ -343,6 +391,13 @@ def ask(
             search_kwargs={"k": vector_top_k, "filter": {"source": {"$in": law_names}}}
         )
         vector_docs = filtered_retriever.invoke(contextualized_q)
+        # 额外获取司法解释等未注册文件的结果，防止被过滤掉
+        all_vector_docs = retriever.invoke(contextualized_q)
+        seen_contents = {d.page_content[:200] for d in vector_docs}
+        for d in all_vector_docs:
+            if d.page_content[:200] not in seen_contents:
+                vector_docs.append(d)
+                seen_contents.add(d.page_content[:200])
     else:
         vector_docs = retriever.invoke(contextualized_q)
 
@@ -351,6 +406,14 @@ def ask(
         bm25_results = bm25_retriever.retrieve(
             contextualized_q, k=bm25_top_k, law_filter=law_names if law_names else None
         )
+        # 同样补充未注册文件的 BM25 结果
+        if law_names:
+            all_bm25 = bm25_retriever.retrieve(contextualized_q, k=bm25_top_k, law_filter=None)
+            seen_bm25 = {d.page_content[:200] for d, _ in bm25_results}
+            for d, s in all_bm25:
+                if d.page_content[:200] not in seen_bm25:
+                    bm25_results.append((d, s))
+                    seen_bm25.add(d.page_content[:200])
 
     # RRF 融合
     merged_docs = reciprocal_rank_fusion(
@@ -365,7 +428,7 @@ def ask(
     else:
         reranked_docs = merged_docs[:rerank_final_k]
 
-    # ⑤ 法条上下文扩展（前后条）
+    # ⑤ 法条上下文扩展（前后条 + 跨条引用）
     expanded_docs = list(reranked_docs)
     if article_index and adjacent_range > 0:
         for doc in reranked_docs:
@@ -378,6 +441,19 @@ def ask(
             except ValueError:
                 continue
 
+            # 跨条引用扩展：解析 referenced_articles 中的条号
+            ref_str = doc.metadata.get("referenced_articles", "")
+            if ref_str:
+                for ref_art in ref_str.split(","):
+                    ref_art = ref_art.strip()
+                    if not ref_art:
+                        continue
+                    ref_match = ARTICLE_PATTERN.search(ref_art)
+                    if ref_match:
+                        ref_int = _chinese_num_to_int(ref_match.group(1))
+                        if ref_int > 0 and ref_int not in article_nums:
+                            article_nums.append(ref_int)
+
             exclude = {d.page_content[:200] for d in expanded_docs}
             adjacent = get_adjacent_articles(
                 article_index, law, article_nums, n=adjacent_range, exclude_contents=exclude
@@ -385,7 +461,12 @@ def ask(
             expanded_docs.extend(adjacent)
 
         if len(expanded_docs) > len(reranked_docs):
-            print(f"  [前后条扩展] {len(reranked_docs)} → {len(expanded_docs)}")
+            print(f"  [上下文扩展] {len(reranked_docs)} → {len(expanded_docs)}")
+
+    # ⑤.5 定义聚合：将相关定义条文注入上下文
+    all_chunks = components.get("chunks", [])
+    if all_chunks:
+        expanded_docs = _inject_definitions(expanded_docs, all_chunks)
 
     # ⑥ 生成答案
     context_parts = []

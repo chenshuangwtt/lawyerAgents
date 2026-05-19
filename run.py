@@ -91,11 +91,11 @@ def main():
     # 8. 启动 FastAPI 服务
     print(f"\n[8/8] 启动 FastAPI 服务...")
     print("=" * 60)
-    print("  服务地址: http://localhost:8000")
-    print("  API 文档: http://localhost:8000/docs")
+    print("  服务地址: http://localhost:8080")
+    print("  API 文档: http://localhost:8080/docs")
     print("=" * 60)
 
-    uvicorn.run(api.app, host="0.0.0.0", port=8000)
+    uvicorn.run(api.app, host="0.0.0.0", port=8080)
 
 
 if __name__ == "__main__":

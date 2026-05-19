@@ -25,7 +25,7 @@ def _compute_data_hash(data_dir: str) -> str:
     if not data_path.exists():
         return ""
     entries = []
-    for f in sorted(data_path.glob("*.docx")):
+    for f in sorted(data_path.rglob("*.docx")):
         stat = f.stat()
         entries.append(f"{f.name}:{stat.st_size}:{stat.st_mtime}")
     return hashlib.md5("|".join(entries).encode()).hexdigest()
