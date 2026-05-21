@@ -19,6 +19,7 @@
 import re
 import os
 import json
+import logging
 from pathlib import Path
 from typing import List, Tuple, Dict, Literal, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,8 @@ from concurrent.futures import ThreadPoolExecutor
 from langchain_core.documents import Document
 from langchain_community.document_loaders import Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+logger = logging.getLogger(__name__)
 
 
 # ================== 常量与辅助函数 ==================
@@ -502,7 +505,7 @@ def load_documents(data_dir: str, parallel: bool = True) -> List[Document]:
         for fp in docx_files:
             all_docs.extend(load_one(fp))
 
-    print(f"加载完成：{len(docx_files)} 个文件，共 {len(all_docs)} 个原始文档块")
+    logger.info("加载完成：%d 个文件，共 %d 个原始文档块", len(docx_files), len(all_docs))
     return all_docs
 
 
@@ -601,7 +604,7 @@ def split_documents(
             entities = _extract_entities(chunk.page_content, law_name)
             chunk.metadata["entities"] = json.dumps(entities, ensure_ascii=False) if entities else ""
 
-    print(f"分割完成：{len(docs)} 个原始文档块 → {len(final_chunks)} 个 chunk")
+    logger.info("分割完成：%d 个原始文档块 → %d 个 chunk", len(docs), len(final_chunks))
     return final_chunks
 
 

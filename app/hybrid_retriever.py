@@ -15,6 +15,7 @@ jieba.dt.tmp_dir = _jieba_cache_dir
 jieba.dt.cache_file = os.path.join(_jieba_cache_dir, "jieba.cache")
 # 抑制 jieba 的 pkg_resources 弃用警告
 warnings.filterwarnings("ignore", category=UserWarning, module="jieba")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
 
 
 def _build_doc_key(doc: Document) -> str:

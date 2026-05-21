@@ -18,6 +18,11 @@ def _load_yaml() -> dict:
         return yaml.safe_load(f)
 
 
+def load_registry() -> dict:
+    """加载完整的注册表 YAML。"""
+    return _load_yaml()
+
+
 def load_domain_law_map() -> Dict[str, List[str]]:
     """领域 → 法律名称映射，供 classifier 使用。"""
     data = _load_yaml()

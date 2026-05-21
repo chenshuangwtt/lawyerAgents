@@ -14,6 +14,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # --- 请求/响应模型 ---
@@ -39,6 +42,7 @@ class SourceItem(BaseModel):
     content: str = Field(..., description="法条原文片段（截断预览）")
     full_content: str = Field(default="", description="法条完整原文")
     source: str = Field(..., description="来源法律名称")
+    confidence: str = Field(default="", description="引用置信度：high/medium/low/suggested")
 
 
 class ChatResponse(BaseModel):
@@ -49,6 +53,7 @@ class ChatResponse(BaseModel):
     sources: list[SourceItem] = Field(..., description="引用的法条来源列表")
     domain: str = Field(default="综合", description="问题所属法律领域")
     risk_warning: str = Field(default="", description="风险提示")
+    case_results: list = Field(default=[], description="相似案例列表")
 
 
 class HealthResponse(BaseModel):
@@ -77,6 +82,7 @@ class SessionMessage(BaseModel):
     question: str
     answer: str
     sources: list[SourceItem]
+    domain: str = Field(default="综合", description="问题所属法律领域")
     created_at: str
 
 
@@ -108,6 +114,7 @@ rag_chain = None
 retriever = None
 llm = None
 rag_components = None
+semantic_cache = None
 
 
 # --- 路由 ---
@@ -118,6 +125,23 @@ async def get_domains():
     from app.law_registry import load_domain_colors
     colors = load_domain_colors()
     return {"domains": [{"name": name, "color": color} for name, color in colors.items()]}
+
+
+@app.get("/api/laws")
+async def get_laws():
+    """获取全部法律领域及其关联法律，供前端领域选择器使用。"""
+    from app.law_registry import load_registry
+    registry = load_registry()
+    domains = []
+    for d in registry.get("domains", []):
+        if d.get("name") == "综合":
+            continue
+        domains.append({
+            "name": d["name"],
+            "color": d.get("color", "bg-gray-50 text-gray-500 ring-gray-200"),
+            "laws": d.get("laws", []),
+        })
+    return {"domains": domains}
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -140,9 +164,35 @@ async def chat(request: ChatRequest):
             detail="RAG 链尚未初始化，请等待服务就绪后重试",
         )
 
+    from app.chat_history import save_record
+
+    # 语义缓存命中 → 直接返回
+    if semantic_cache:
+        try:
+            cached = semantic_cache.lookup(request.question)
+        except Exception as e:
+            logger.warning("[语义缓存] 查找异常: %s", e)
+            cached = None
+        if cached:
+            record_id = save_record(
+                session_id=request.session_id,
+                question=request.question,
+                answer=cached["answer"],
+                sources=cached["sources"],
+                domain=cached.get("domain", "综合"),
+            )
+            return ChatResponse(
+                id=record_id,
+                session_id=request.session_id,
+                answer=cached["answer"],
+                sources=[SourceItem(**s) for s in cached["sources"]],
+                domain=cached.get("domain", "综合"),
+                risk_warning="本回答由 AI 生成，仅供参考，不构成正式法律意见。",
+                case_results=cached.get("case_results", []),
+            )
+
     try:
         from app.rag_chain import ask
-        from app.chat_history import save_record
 
         result = ask(
             rag_chain, retriever, llm,
@@ -150,11 +200,23 @@ async def chat(request: ChatRequest):
             components=rag_components,
         )
 
+        # 写入语义缓存
+        if semantic_cache:
+            try:
+                semantic_cache.store(
+                    request.question, result["answer"],
+                    result["sources"], result.get("domain", "综合"),
+                    result.get("case_results", []),
+                )
+            except Exception as e:
+                logger.warning("[语义缓存] 写入异常: %s", e)
+
         record_id = save_record(
             session_id=request.session_id,
             question=request.question,
             answer=result["answer"],
             sources=result["sources"],
+            domain=result.get("domain", "综合"),
         )
 
         return ChatResponse(
@@ -164,6 +226,7 @@ async def chat(request: ChatRequest):
             sources=[SourceItem(**s) for s in result["sources"]],
             domain=result.get("domain", "综合"),
             risk_warning=result.get("risk_warning", ""),
+            case_results=result.get("case_results", []),
         )
     except Exception as e:
         import traceback
@@ -184,20 +247,60 @@ async def chat_stream(request: ChatRequest):
         )
 
     import json
+    import asyncio
 
     async def event_generator():
-        from app.rag_chain import ask_stream
         from app.chat_history import save_record
+
+        # 语义缓存命中 → 模拟流式回放
+        if semantic_cache:
+            try:
+                cached = semantic_cache.lookup(request.question)
+            except Exception as e:
+                logger.warning("[语义缓存] 查找异常: %s", e)
+                cached = None
+            if cached:
+                yield f"event: meta\ndata: {json.dumps({'domain': cached.get('domain', '综合'), 'cached': True}, ensure_ascii=False)}\n\n"
+                yield f"event: token\ndata: {json.dumps({'content': cached['answer']}, ensure_ascii=False)}\n\n"
+                save_record(
+                    session_id=request.session_id,
+                    question=request.question,
+                    answer=cached["answer"],
+                    sources=cached["sources"],
+                    domain=cached.get("domain", "综合"),
+                )
+                done_data = {
+                    "sources": cached["sources"],
+                    "risk_warning": "本回答由 AI 生成，仅供参考，不构成正式法律意见。",
+                    "domain": cached.get("domain", "综合"),
+                    "case_results": cached.get("case_results", []),
+                    "cached": True,
+                }
+                yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
+                return
+
+        from app.rag_chain import ask_stream
 
         answer_text = ""
         sources = []
         risk_warning = ""
 
-        async for event in ask_stream(
+        stream = ask_stream(
             rag_chain, retriever, llm,
             request.question, request.session_id,
             components=rag_components,
-        ):
+        )
+
+        while True:
+            try:
+                event = await asyncio.wait_for(stream.__anext__(), timeout=15)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                # 15 秒无事件，发保活注释防止连接断开
+                yield ":keepalive\n\n"
+                continue
+
             event_type = event["type"]
 
             if event_type == "meta":
@@ -222,7 +325,18 @@ async def chat_stream(request: ChatRequest):
                     question=request.question,
                     answer=answer_text,
                     sources=sources,
+                    domain=event.get("domain", "综合"),
                 )
+                # 写入语义缓存
+                if semantic_cache:
+                    try:
+                        semantic_cache.store(
+                            request.question, answer_text,
+                            sources, event.get("domain", "综合"),
+                            event.get("case_results", []),
+                        )
+                    except Exception as e:
+                        logger.warning("[语义缓存] 写入异常: %s", e)
                 done_data = {
                     "sources": sources,
                     "risk_warning": risk_warning,
@@ -231,6 +345,8 @@ async def chat_stream(request: ChatRequest):
                     done_data["domain"] = event["domain"]
                 if "multi_domain" in event:
                     done_data["multi_domain"] = event["multi_domain"]
+                if "case_results" in event:
+                    done_data["case_results"] = event["case_results"]
                 yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
 
             elif event_type == "error":
@@ -260,6 +376,7 @@ async def get_session_detail(session_id: str):
             question=r["question"],
             answer=r["answer"],
             sources=[SourceItem(**s) for s in r["sources"]],
+            domain=r.get("domain", "综合"),
             created_at=r["created_at"],
         )
         for r in records
@@ -283,3 +400,50 @@ async def delete_session(session_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
     return {"ok": True}
+
+
+@app.get("/api/sessions/{session_id}/export")
+async def export_session(session_id: str):
+    """将会话导出为 Markdown 文件。"""
+    from app.chat_history import get_session_records
+    from fastapi.responses import Response
+    from datetime import datetime
+
+    records = get_session_records(session_id)
+    if not records:
+        raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
+
+    lines = [
+        "# 法律咨询记录\n",
+        f"**会话ID**: `{session_id}`  ",
+        f"**导出时间**: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n",
+        "---\n",
+    ]
+
+    for i, r in enumerate(records, 1):
+        domain = r.get("domain", "综合")
+        lines.append(f"## 问题 {i}\n")
+        lines.append(f"**领域**: {domain}\n")
+        lines.append(f"**问题**: {r['question']}\n")
+        lines.append(f"**回答**:\n{r['answer']}\n")
+
+        sources = r.get("sources", [])
+        if sources:
+            lines.append("**引用法条**:\n")
+            for s in sources:
+                lines.append(f"- {s.get('source', '')}")
+            lines.append("")
+
+        lines.append("---\n")
+
+    from urllib.parse import quote
+
+    content = "\n".join(lines)
+    filename = f"法律咨询_{session_id[:8]}_{datetime.now().strftime('%Y%m%d')}.md"
+    filename_ascii = f"legal_{session_id[:8]}_{datetime.now().strftime('%Y%m%d')}.md"
+
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename=\"{filename_ascii}\"; filename*=UTF-8''{quote(filename)}"},
+    )

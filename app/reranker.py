@@ -4,7 +4,7 @@
 与 Qwen 使用同一个 API Key，无需额外注册。
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from langchain_core.documents import Document
 
 
@@ -24,7 +24,7 @@ class CrossEncoderReranker:
         query: str,
         documents: List[Document],
         top_k: int = 5,
-    ) -> List[Document]:
+    ) -> List[Tuple[Document, float]]:
         """
         对文档列表按 query 相关性重排序。
 
@@ -34,7 +34,7 @@ class CrossEncoderReranker:
             top_k: 返回数量。
 
         Returns:
-            重排序后的 top-k 文档。
+            重排序后的 top-k 文档及对应相关性分数 [(doc, score), ...]。
         """
         if not documents:
             return []
@@ -69,5 +69,6 @@ class CrossEncoderReranker:
         for item in data.get("output", {}).get("results", []):
             idx = item["index"]
             if 0 <= idx < len(documents):
-                results.append(documents[idx])
+                score = item.get("relevance_score", 0.0)
+                results.append((documents[idx], score))
         return results

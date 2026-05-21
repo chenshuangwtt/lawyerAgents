@@ -6,13 +6,16 @@ LangGraph 多域协作图：分类 → 路由 → 并行检索 → 合并。
 
 from typing import List, Dict, Any, Optional, Annotated
 import operator
+import logging
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 from typing_extensions import TypedDict
 
 from app.classifier import classify_question_multi
-from app.rag_chain import _retrieve_context, _contextualize_query, _get_session_history
+from app.rag_chain import _retrieve_context, _contextualize_query, _get_session_history, invoke_with_timeout
+
+logger = logging.getLogger(__name__)
 
 
 # --- State ---
@@ -24,9 +27,11 @@ class AgentState(TypedDict):
     retrieved_contexts: Annotated[list, operator.add]
     context_text: str
     reranked_docs: list
+    reranked_scores: list
     sources: list
     domain: str
     is_multi_domain: bool
+    contextualized_question: str
 
 
 # 模块级引用，由 set_graph_components() 注入
@@ -51,7 +56,22 @@ def set_graph_components(retriever, llm, lightweight_llm, components, max_domain
 
 def classify(state: AgentState) -> dict:
     """① 多域分类"""
-    result = classify_question_multi(_llm, state["question"], max_domains=_max_domains)
+    try:
+        result = classify_question_multi(_llm, state["question"], max_domains=_max_domains)
+    except TimeoutError:
+        logger.warning("分类超时，使用默认领域")
+        result = {
+            "domains": [{"domain": "综合", "law_names": []}],
+            "primary_domain": "综合",
+            "is_multi_domain": False,
+        }
+    except Exception as e:
+        logger.warning("分类失败: %s，使用默认领域", e)
+        result = {
+            "domains": [{"domain": "综合", "law_names": []}],
+            "primary_domain": "综合",
+            "is_multi_domain": False,
+        }
     return {
         "domains": result["domains"],
         "domain": result["primary_domain"],
@@ -62,14 +82,26 @@ def classify(state: AgentState) -> dict:
 def direct_retrieve(state: AgentState) -> dict:
     """单域快速路径：直接检索"""
     domain_info = state["domains"][0]
-    ctx = _retrieve_context(
-        _retriever, _llm, state["question"], state["session_id"], _components,
-        domain_override=domain_info["domain"],
-        law_names_override=domain_info["law_names"],
-    )
+    try:
+        ctx = _retrieve_context(
+            _retriever, _llm, state["question"], state["session_id"], _components,
+            domain_override=domain_info["domain"],
+            law_names_override=domain_info["law_names"],
+        )
+    except Exception as e:
+        logger.error("direct_retrieve 失败: %s", e)
+        return {
+            "context_text": "",
+            "reranked_docs": [],
+            "reranked_scores": [],
+            "contextualized_question": state["question"],
+        }
     return {
         "context_text": ctx["context_text"],
         "reranked_docs": ctx["reranked_docs"],
+        "reranked_scores": ctx.get("reranked_scores", []),
+        "contextualized_question": ctx["question"],
+        "domain": domain_info["domain"],
     }
 
 
@@ -88,8 +120,12 @@ def generate_sub_questions(state: AgentState) -> dict:
         f"示例：\n劳动: 用人单位未缴社保解除劳动合同，劳动者有哪些权利？\n税务: 用人单位欠缴社保涉及哪些税务责任？"
     )
 
-    response = llm.invoke(prompt)
-    raw = response.content if hasattr(response, "content") else str(response)
+    try:
+        response = invoke_with_timeout(llm, prompt, timeout=15)
+        raw = response.content if hasattr(response, "content") else str(response)
+    except (TimeoutError, Exception) as e:
+        logger.warning("子问题生成失败: %s，使用原问题", e)
+        return {"sub_questions": {d["domain"]: question for d in domains}}
 
     sub_questions = {}
     for line in raw.strip().split("\n"):
@@ -110,7 +146,7 @@ def generate_sub_questions(state: AgentState) -> dict:
         if d["domain"] not in sub_questions:
             sub_questions[d["domain"]] = question
 
-    print(f"  [子问题] {sub_questions}")
+    logger.info("子问题: %s", sub_questions)
     return {"sub_questions": sub_questions}
 
 
@@ -120,26 +156,35 @@ def retrieve_one_domain(state: dict) -> dict:
     law_names = state["law_names"]
     sub_question = state["sub_question"]
 
-    ctx = _retrieve_context(
-        _retriever, _llm, sub_question, state.get("session_id", "default"), _components,
-        domain_override=domain_name,
-        law_names_override=law_names,
-    )
+    try:
+        ctx = _retrieve_context(
+            _retriever, _llm, sub_question, state.get("session_id", "default"), _components,
+            domain_override=domain_name,
+            law_names_override=law_names,
+        )
+    except Exception as e:
+        logger.error("检索-%s 失败: %s", domain_name, e)
+        return {
+            "retrieved_contexts": [{
+                "domain": domain_name,
+                "context_text": "",
+                "reranked_docs": [],
+                "reranked_scores": [],
+            }]
+        }
 
     return {
         "retrieved_contexts": [{
             "domain": domain_name,
             "context_text": ctx["context_text"],
             "reranked_docs": ctx["reranked_docs"],
+            "reranked_scores": ctx.get("reranked_scores", []),
         }]
     }
 
 
-def merge_contexts(state: AgentState) -> dict:
-    """合并多域检索结果"""
-    results = state["retrieved_contexts"]
-
-    # 合并去重
+def _simple_merge(results):
+    """简单合并：去重 + 拼接（默认行为）"""
     all_docs = []
     seen = set()
     context_parts = []
@@ -160,6 +205,53 @@ def merge_contexts(state: AgentState) -> dict:
         "reranked_docs": all_docs[:15],
         "domain": "、".join(domain_names),
     }
+
+
+def _weighted_merge(results, domain_priority_order):
+    """加权合并：reranker 分数 + 领域优先级"""
+    priority_map = {name: 100 - i * 10 for i, name in enumerate(domain_priority_order)}
+
+    all_scored_docs = []
+    seen = set()
+    context_parts = []
+    domain_names = []
+
+    for r in results:
+        d = r["domain"]
+        domain_names.append(d)
+        context_parts.append(f"### [领域：{d}]\n{r['context_text']}")
+
+        domain_weight = priority_map.get(d, 50) / 100.0
+        scores = r.get("reranked_scores", [])
+
+        for i, doc in enumerate(r.get("reranked_docs", [])):
+            key = doc.page_content[:200]
+            if key in seen:
+                continue
+            seen.add(key)
+
+            relevance = scores[i] if i < len(scores) else 0.0
+            combined = relevance * 0.6 + domain_weight * 0.4
+            all_scored_docs.append((doc, combined))
+
+    all_scored_docs.sort(key=lambda x: x[1], reverse=True)
+    top_docs = [doc for doc, _ in all_scored_docs[:15]]
+
+    return {
+        "context_text": "\n\n".join(context_parts),
+        "reranked_docs": top_docs,
+        "domain": "、".join(domain_names),
+    }
+
+
+def merge_contexts(state: AgentState) -> dict:
+    """合并多域检索结果：支持加权模式"""
+    results = state["retrieved_contexts"]
+
+    if _components.get("enable_weighted_merge", False):
+        priority_order = _components.get("domain_priority_order", "刑事,行政,治安,监察").split(",")
+        return _weighted_merge(results, priority_order)
+    return _simple_merge(results)
 
 
 # --- 条件路由 ---

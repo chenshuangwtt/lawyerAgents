@@ -10,6 +10,7 @@ langgraph>=0.4
 
 # --- 向量/检索 ---
 chromadb>=0.6
+lancedb>=0.10
 jieba>=0.42
 rank-bm25>=0.2
 

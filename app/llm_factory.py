@@ -8,10 +8,14 @@ LLM / Embedding 工厂模块：根据配置创建对应厂商的模型实例。
 嵌入模型使用模块级单例缓存，首次创建后复用，避免重复加载权重。
 """
 
+import logging
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.embeddings import Embeddings
 
 from app.config import Settings
+
+logger = logging.getLogger(__name__)
 
 # 嵌入模型单例缓存
 _embeddings_cache = {}
@@ -30,6 +34,7 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             model=settings.qwen_chat_model,
             api_key=settings.qwen_api_key,
             base_url=_DASHSCOPE_BASE,
+            timeout=30,
         )
 
     elif provider == "deepseek":
@@ -38,6 +43,7 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             model=settings.deepseek_chat_model,
             api_key=settings.deepseek_api_key,
             api_base=settings.deepseek_base_url,
+            timeout=30,
         )
 
     elif provider == "openai":
@@ -46,6 +52,7 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             model=settings.openai_chat_model,
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
+            timeout=30,
         )
 
     elif provider == "openai_compatible":
@@ -54,6 +61,7 @@ def create_chat_model(settings: Settings) -> BaseChatModel:
             model=settings.openai_chat_model,
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
+            timeout=30,
         )
 
     raise ValueError(
@@ -71,6 +79,7 @@ def create_lightweight_llm(settings: Settings) -> BaseChatModel:
             model=settings.qwen_summary_model,
             api_key=settings.qwen_api_key,
             base_url=_DASHSCOPE_BASE,
+            timeout=30,
         )
 
     # 其他提供商复用主模型（无独立轻量模型配置）
@@ -100,7 +109,7 @@ def create_embeddings(settings: Settings) -> Embeddings:
         )
 
     if cache_key in _embeddings_cache:
-        print(f"  复用已缓存的 embedding 模型: {cache_key[0]}/{cache_key[1]}")
+        logger.info("复用已缓存的 embedding 模型: %s/%s", cache_key[0], cache_key[1])
         return _embeddings_cache[cache_key]
 
     embeddings = _build_embeddings(settings, provider)

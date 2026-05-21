@@ -13,6 +13,7 @@ RAG（检索增强生成）链模块，支持完整的 7 步流水线。
 
 import re
 import json
+import logging
 from typing import List, Dict, Any, Optional
 
 from langchain_core.language_models import BaseChatModel
@@ -33,13 +34,36 @@ from app.article_index import get_adjacent_articles
 from app.memory_compression import compress_messages
 from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
 
+logger = logging.getLogger(__name__)
+
+# 概览类问题关键词：匹配任一则跳过案例检索
+_OVERVIEW_PATTERNS = re.compile(
+    r"(了解|概述|法律规定|什么是|介绍|有哪些|相关法律|规定了|主要内容|"
+    r"立法|全文|条文|总则|分则|基本原则|基本概念|总体|概述|体系|示例)",
+)
+
+
+def _is_overview_question(question: str) -> bool:
+    """判断是否为宽泛的法律概览类问题（此类问题无需检索案例）。"""
+    return bool(_OVERVIEW_PATTERNS.search(question))
+
+
+def invoke_with_timeout(llm, messages, timeout: int = 15):
+    """同步调用 LLM，超时则抛出 TimeoutError。"""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(llm.invoke, messages)
+        return future.result(timeout=timeout)
+
 
 # === Prompt: 追问 → 独立法律问题 ===
 CONTEXTUALIZE_Q_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """根据对话历史，将用户的追问改写为一个可以独立理解的法律问题。
-- 如果用户问题引用了前文（如"它"、"那"、"举个例子"、"第二条"），请补全所指的具体法律概念。
+规则：
+- 如果用户问题引用了前文（如"它"、"那"），请补全所指的具体法律概念。
 - 如果用户问题已经完整，直接原样返回。
-- 只输出改写后的问题，不要加任何解释。"""),
+- 【严禁】输出答案、分析、解释或列表。你只负责改写问题，不负责回答。
+- 只输出一行改写后的完整问题，不要加任何前缀或解释。"""),
     MessagesPlaceholder("chat_history"),
     ("human", "用户追问：{question}"),
 ])
@@ -53,6 +77,12 @@ QA_PROMPT = ChatPromptTemplate.from_messages([
 - **证据闭环**：所有法律判断必须挂载法条出处，如（依据《劳动法》第二十一条）。若提供的法条资料中无相关依据，诚实说明，严禁编造法条。
 - **领域判断**：如果用户的问题超出【领域：{domain}】的范围，不要强行套用法条，应明确说明领域差异，给出通识性建议，并建议咨询专业律师。
 - **语气**：专业但不冰冷，适当使用"您的情况可能涉及"、"建议您重点关注"等表达。
+
+【反幻觉铁律】
+- **只引用提供的法条**：引用法条时，条号、条文内容必须严格来自上方"相关法律条文"部分，绝不允许凭记忆编造条号或条文内容。
+- **不发明细节**：如果用户未提及具体地区、金额、情形，不要自行补充"如北京XX元、广东XX元"等虚构细节。只基于用户实际提问和提供的法条回答。
+- **不确定时坦承**：如果提供的法条资料中没有直接对应的条文，明确说"根据提供的法律条文，暂未找到直接对应的规定"，而不是编造一个条号来回应。
+- **不无中生有**：用户的问题就是问题，不是"分析"。不要假设用户已经做过法律分析、引用过法条或给出过判断。禁止使用"您的分析方向正确""您引用的条文有误""您提到的XX"等表述来评价用户从未说过的话。直接回答问题本身。
 
 【输出结构要求】请严格按以下格式输出：
 
@@ -73,7 +103,7 @@ QA_PROMPT = ChatPromptTemplate.from_messages([
 ### 📜 免责声明
 （本回复由 AI 生成，仅供学习参考，不构成正式法律意见。法律事务复杂多变，请务必咨询持证律师以获取专业法律服务。）
 
-【重要】你始终是回答问题的法律顾问，不是审稿人。即使对话历史中出现过类似问题，也请直接回答当前用户的问题，不要对历史回答进行点评、批改或总结差异。忽略历史中的任何"回答模板"或"示例输出"，只基于当前提供的法律条文回答。"""),
+【重要】你始终是回答问题的法律顾问，不是审稿人。即使对话历史中出现过类似问题，也请直接回答当前用户的问题，不要对历史回答进行点评、批改或总结差异。忽略历史中的任何"回答模板"或"示例输出"，只基于当前提供的法律条文回答。不要假设用户有任何"分析"需要纠正。"""),
     MessagesPlaceholder("chat_history"),
     ("human", """相关法律条文：
 {context}
@@ -92,6 +122,12 @@ QA_MULTI_DOMAIN_PROMPT = ChatPromptTemplate.from_messages([
 - **领域关联**：如果不同领域的法条之间有关联（如劳动法和社会保险法的交叉），明确指出并解释适用逻辑。
 - **语气**：专业但不冰冷，适当使用"您的情况可能涉及"、"建议您重点关注"等表达。
 
+【反幻觉铁律】
+- **只引用提供的法条**：引用法条时，条号、条文内容必须严格来自上方"相关法律条文"部分，绝不允许凭记忆编造条号或条文内容。
+- **不发明细节**：如果用户未提及具体地区、金额、情形，不要自行补充虚构细节。只基于用户实际提问和提供的法条回答。
+- **不确定时坦承**：如果提供的法条资料中没有直接对应的条文，明确说"根据提供的法律条文，暂未找到直接对应的规定"，而不是编造一个条号来回应。
+- **不无中生有**：用户的问题就是问题，不是"分析"。不要假设用户已经做过法律分析、引用过法条或给出过判断。禁止使用"您的分析方向正确""您引用的条文有误""您提到的XX"等表述来评价用户从未说过的话。直接回答问题本身。
+
 【输出结构要求】请严格按以下格式输出：
 
 ### ⚖️ 初步判定
@@ -108,7 +144,7 @@ QA_MULTI_DOMAIN_PROMPT = ChatPromptTemplate.from_messages([
 ### 📜 免责声明
 （本回复由 AI 生成，仅供学习参考，不构成正式法律意见。法律事务复杂多变，请务必咨询持证律师以获取专业法律服务。）
 
-【重要】你始终是回答问题的法律顾问，不是审稿人。请直接回答当前用户的问题，不要对历史回答进行点评。"""),
+【重要】你始终是回答问题的法律顾问，不是审稿人。请直接回答当前用户的问题，不要对历史回答进行点评。不要假设用户有任何"分析"需要纠正。"""),
     MessagesPlaceholder("chat_history"),
     ("human", """涉及的法律领域：{domains}
 
@@ -172,7 +208,7 @@ def _contextualize_query(
     history: List,
     question: str,
 ) -> str:
-    """用对话历史将追问重写为独立完整的法律问题。"""
+    """用对话历史将追问重写为独立完整的法律问题（15s 超时）。"""
     if not history:
         return question
 
@@ -180,13 +216,22 @@ def _contextualize_query(
         chat_history=history,
         question=question,
     )
-    response = llm.invoke(messages)
-    rewritten = response.content if hasattr(response, "content") else str(response)
-    rewritten = rewritten.strip()
-
-    if rewritten and rewritten != question:
-        print(f"  [query重写] \"{question}\" -> \"{rewritten}\"")
-    return rewritten
+    logger.info("[query重写] 开始...")
+    try:
+        response = invoke_with_timeout(llm, messages, timeout=15)
+        rewritten = response.content if hasattr(response, "content") else str(response)
+        rewritten = rewritten.strip()
+        if rewritten and rewritten != question:
+            logger.info("[query重写] \"%s\" -> \"%s\"", question, rewritten)
+        else:
+            logger.info("[query重写] 完成（无变化）")
+        return rewritten
+    except TimeoutError:
+        logger.warning("[query重写] 15s 超时，使用原问题")
+        return question
+    except Exception as e:
+        logger.warning("[query重写] 失败: %s，使用原问题", e)
+        return question
 
 
 # --- 来源格式化 ---
@@ -301,7 +346,7 @@ def _inject_definitions(
                 break
 
     if definitions_added:
-        print(f"  [定义注入] 注入 {len(definitions_added)} 条定义条文")
+        logger.info("[定义注入] 注入 %s 条定义条文", len(definitions_added))
     return expanded_docs + definitions_added
 
 
@@ -312,18 +357,19 @@ def _verify_citations(
     """
     验证引用的法条条号是否真实存在，移除编造的条号。
 
+    法律在索引中但条号未找到时移除（防止 LLM 编造条号）。
+
     Args:
         sources: _format_sources() 返回的来源列表。
         article_index: 条号索引 {law_name: {article_num(int): [chunks]}}。
 
     Returns:
-        过滤后的来源列表（仅保留真实存在的条号）。
+        过滤后的来源列表。
     """
     if not article_index or not sources:
         return sources
 
     verified_sources = []
-    removed_total = 0
 
     for src in sources:
         label = src["source"]
@@ -355,9 +401,7 @@ def _verify_citations(
                 art_num = _chinese_num_to_int(art_match.group(1))
                 if art_num > 0 and art_num in law_articles:
                     verified_articles.append(clean_art)
-                else:
-                    removed_total += 1
-                    print(f"  [引用验证] 移除不存在的条号: {law_name} {clean_art}")
+                # 条号不在索引中 → 可能是 LLM 编造，移除
             else:
                 # 无法解析的条号保留
                 verified_articles.append(art)
@@ -365,14 +409,53 @@ def _verify_citations(
         if verified_articles:
             new_label = f"{law_name} {'、'.join(verified_articles)}"
         else:
-            new_label = law_name
+            # 所有条号都被移除 → 该法律引用无效，跳过
+            continue
 
         verified_sources.append({**src, "source": new_label})
 
-    if removed_total > 0:
-        print(f"  [引用验证] 共移除 {removed_total} 个不存在的条号")
-
     return verified_sources
+
+
+def _verify_citations_semantic(
+    sources: List[Dict[str, str]],
+    article_index: Dict,
+    answer: str = "",
+    reranked_docs: Optional[List] = None,
+    enable_semantic: bool = False,
+) -> List[Dict[str, str]]:
+    """
+    引用校验增强版：结构验证 + 语义溯源。
+
+    enable_semantic=False 时执行结构验证（移除不存在的条号）。
+    enable_semantic=True 时先结构验证再语义验证（移除 low 置信度引用）。
+    """
+    # 始终先做结构验证
+    sources = _verify_citations(sources, article_index)
+
+    if not enable_semantic or not answer:
+        return sources
+
+    # 语义验证：标注 confidence，移除 low 级别引用
+    from app.citation_verifier import CitationVerifier
+    verifier = CitationVerifier(article_index)
+    sources = verifier.verify_citations(sources, answer)
+
+    # 移除 low 置信度引用（语义不匹配，很可能是编造）
+    sources = [s for s in sources if s.get("confidence", "") != "low"]
+
+    # 遗漏检测（最多 3 条）
+    if reranked_docs:
+        missing = verifier.detect_missing_citations(answer, reranked_docs)
+        for m in missing[:3]:
+            sources.append({
+                "source": m["source"],
+                "content": m.get("content", ""),
+                "full_content": m.get("full_content", ""),
+                "confidence": "suggested",
+            })
+
+    return sources
 
 
 def build_rag_chain(
@@ -430,6 +513,7 @@ def build_rag_chain(
         "article_index": article_index,
         "reranker": reranker,
         "chunks": chunks,
+        "lightweight_llm": lightweight_llm,
         "bm25_top_k": bm25_top_k,
         "vector_top_k": vector_top_k,
         "rerank_top_k": rerank_top_k,
@@ -477,19 +561,25 @@ def _retrieve_context(
     if domain_override is not None:
         domain = domain_override
         law_names = law_names_override or []
-        print(f"  [分类-override] 领域={domain}，相关法律={law_names or '全部'}")
+        logger.info("[分类-override] 领域=%s，相关法律=%s", domain, law_names or '全部')
     elif enable_classification:
-        result = classify_question(llm, question)
-        domain = result["domain"]
-        law_names = result["law_names"]
-        print(f"  [分类] 领域={domain}，相关法律={law_names or '全部'}")
+        try:
+            result = classify_question(llm, question)
+            domain = result["domain"]
+            law_names = result["law_names"]
+        except Exception as e:
+            logger.warning("[分类] 失败: %s，使用默认领域", e)
+            domain = "综合"
+            law_names = []
+        logger.info("[分类] 领域=%s，相关法律=%s", domain, law_names or '全部')
     else:
         domain = "综合"
         law_names = []
 
-    # ② 多轮追问重写
+    # ② 多轮追问重写（优先使用轻量 LLM，低延迟）
     history_obj = _get_session_history(session_id)
-    contextualized_q = _contextualize_query(llm, history_obj.messages, question)
+    contextualize_llm = components.get("lightweight_llm") or llm
+    contextualized_q = _contextualize_query(contextualize_llm, history_obj.messages, question)
 
     # ③ 混合检索（BM25 + 向量 + RRF）
     if law_names and hasattr(retriever, 'vectorstore'):
@@ -522,48 +612,66 @@ def _retrieve_context(
     merged_docs = reciprocal_rank_fusion(
         bm25_results, vector_docs, k=rerank_top_k, rrf_constant=rrf_constant
     )
-    print(f"  [混合检索] BM25={len(bm25_results)} + 向量={len(vector_docs)} → RRF融合={len(merged_docs)}")
+    logger.info("[混合检索] BM25=%s + 向量=%s → RRF融合=%s", len(bm25_results), len(vector_docs), len(merged_docs))
+    if len(vector_docs) == 0:
+        logger.warning("[混合检索] 向量检索返回 0 条，可能是 Embedding API 响应异常或向量库未完整构建")
 
     # ④ Rerank 精排
     if reranker and merged_docs:
-        reranked_docs = reranker.rerank(contextualized_q, merged_docs, top_k=rerank_final_k)
-        print(f"  [Rerank] {len(merged_docs)} → {len(reranked_docs)}")
+        scored_reranked = reranker.rerank(contextualized_q, merged_docs, top_k=rerank_final_k)
+        reranked_docs = [doc for doc, _ in scored_reranked]
+        reranked_scores = [score for _, score in scored_reranked]
+        logger.info("[Rerank] %s → %s", len(merged_docs), len(reranked_docs))
     else:
         reranked_docs = merged_docs[:rerank_final_k]
+        reranked_scores = [0.0] * len(reranked_docs)
 
     # ⑤ 法条上下文扩展（前后条 + 跨条引用）
-    expanded_docs = list(reranked_docs)
-    if article_index and adjacent_range > 0:
-        for doc in reranked_docs:
-            law = doc.metadata.get("source", "")
-            int_str = doc.metadata.get("article_numbers_int", "")
-            if not law or not int_str:
-                continue
-            try:
-                article_nums = [int(x) for x in int_str.split(",") if x.strip()]
-            except ValueError:
-                continue
+    if components.get("enable_intelligent_expansion", False):
+        from app.expander import expand_context_with_agent
+        expansion_llm = components.get("expansion_llm") or components.get("lightweight_llm")
+        expanded_docs = expand_context_with_agent(
+            llm=expansion_llm,
+            query=contextualized_q,
+            reranked_docs=reranked_docs,
+            article_index=article_index,
+            all_chunks=components.get("chunks", []),
+            adjacent_range=adjacent_range,
+            expansion_depth=components.get("expansion_depth", 1),
+        )
+    else:
+        expanded_docs = list(reranked_docs)
+        if article_index and adjacent_range > 0:
+            for doc in reranked_docs:
+                law = doc.metadata.get("source", "")
+                int_str = doc.metadata.get("article_numbers_int", "")
+                if not law or not int_str:
+                    continue
+                try:
+                    article_nums = [int(x) for x in int_str.split(",") if x.strip()]
+                except ValueError:
+                    continue
 
-            ref_str = doc.metadata.get("referenced_articles", "")
-            if ref_str:
-                for ref_art in ref_str.split(","):
-                    ref_art = ref_art.strip()
-                    if not ref_art:
-                        continue
-                    ref_match = ARTICLE_PATTERN.search(ref_art)
-                    if ref_match:
-                        ref_int = _chinese_num_to_int(ref_match.group(1))
-                        if ref_int > 0 and ref_int not in article_nums:
-                            article_nums.append(ref_int)
+                ref_str = doc.metadata.get("referenced_articles", "")
+                if ref_str:
+                    for ref_art in ref_str.split(","):
+                        ref_art = ref_art.strip()
+                        if not ref_art:
+                            continue
+                        ref_match = ARTICLE_PATTERN.search(ref_art)
+                        if ref_match:
+                            ref_int = _chinese_num_to_int(ref_match.group(1))
+                            if ref_int > 0 and ref_int not in article_nums:
+                                article_nums.append(ref_int)
 
-            exclude = {d.page_content[:200] for d in expanded_docs}
-            adjacent = get_adjacent_articles(
-                article_index, law, article_nums, n=adjacent_range, exclude_contents=exclude
-            )
-            expanded_docs.extend(adjacent)
+                exclude = {d.page_content[:200] for d in expanded_docs}
+                adjacent = get_adjacent_articles(
+                    article_index, law, article_nums, n=adjacent_range, exclude_contents=exclude
+                )
+                expanded_docs.extend(adjacent)
 
-        if len(expanded_docs) > len(reranked_docs):
-            print(f"  [上下文扩展] {len(reranked_docs)} → {len(expanded_docs)}")
+            if len(expanded_docs) > len(reranked_docs):
+                logger.info("[上下文扩展] %s → %s", len(reranked_docs), len(expanded_docs))
 
     # ⑤.5 定义聚合
     all_chunks = components.get("chunks", [])
@@ -582,6 +690,7 @@ def _retrieve_context(
         "domain": domain,
         "question": contextualized_q,
         "reranked_docs": reranked_docs,
+        "reranked_scores": reranked_scores,
         "article_index": article_index,
     }
 
@@ -615,13 +724,26 @@ def ask(
     # ⑦ 格式化来源 + 引用校验 + 风险提示
     answer_text = response.content if hasattr(response, "content") else str(response)
     sources = _format_sources(ctx["reranked_docs"], answer=answer_text)
-    sources = _verify_citations(sources, ctx["article_index"])
+    sources = _verify_citations_semantic(
+        sources, ctx["article_index"],
+        answer=answer_text,
+        reranked_docs=ctx["reranked_docs"],
+        enable_semantic=components.get("enable_semantic_verification", False),
+    )
+
+    # 案例检索（概览类问题跳过）
+    case_results = []
+    case_searcher = components.get("case_searcher")
+    if case_searcher and case_searcher.available and not _is_overview_question(question):
+        case_top_k = components.get("case_top_k", 3)
+        case_results = case_searcher.search(question, top_k=case_top_k, domain=ctx["domain"])
 
     return {
         "answer": answer_text,
         "sources": sources,
         "domain": ctx["domain"],
         "risk_warning": RISK_WARNING,
+        "case_results": case_results,
     }
 
 
@@ -679,12 +801,25 @@ async def ask_stream(
 
             answer_text = "".join(answer_parts)
             sources = _format_sources(ctx["reranked_docs"], answer=answer_text)
-            sources = _verify_citations(sources, ctx["article_index"])
+            sources = _verify_citations_semantic(
+                sources, ctx["article_index"],
+                answer=answer_text,
+                reranked_docs=ctx["reranked_docs"],
+                enable_semantic=components.get("enable_semantic_verification", False),
+            )
+
+            # 案例检索（概览类问题跳过）
+            case_results = []
+            case_searcher = components.get("case_searcher")
+            if case_searcher and case_searcher.available and not _is_overview_question(question):
+                case_top_k = components.get("case_top_k", 3)
+                case_results = case_searcher.search(question, top_k=case_top_k, domain=ctx["domain"])
 
             yield {
                 "type": "done",
                 "sources": sources,
                 "risk_warning": RISK_WARNING,
+                "case_results": case_results,
             }
     except Exception as e:
         import traceback
@@ -703,44 +838,57 @@ async def _ask_stream_graph(
     """LangGraph 路径的流式输出。"""
     from langchain_core.messages import HumanMessage, AIMessage
 
+    import asyncio
+
     graph_input = {"question": question, "session_id": session_id}
     graph_result = None
+    classify_data = None
 
     # 运行图（检索阶段）
-    async for event in graph.astream(graph_input, stream_mode="updates"):
-        for node_name, update in event.items():
-            if node_name == "classify":
-                domains = update.get("domains", [])
-                is_multi = update.get("is_multi_domain", False)
-                domain_names = [d["domain"] for d in domains]
-                yield {
-                    "type": "meta",
-                    "domain": update.get("domain", "综合"),
-                    "domains": domain_names,
-                    "multi_domain": is_multi,
-                }
-            elif node_name == "generate_sub_questions":
-                sq = update.get("sub_questions", {})
-                for d, q in sq.items():
-                    yield {"type": "substep", "step": "sub_question", "domain": d, "question": q}
-            elif node_name == "retrieve_one_domain":
-                for ctx_item in update.get("retrieved_contexts", []):
-                    yield {"type": "substep", "step": "retrieve", "domain": ctx_item["domain"]}
-            elif node_name == "direct_retrieve":
-                graph_result = update
-            elif node_name == "merge_contexts":
-                graph_result = update
+    try:
+        async for event in graph.astream(graph_input, stream_mode="updates"):
+            logger.info("[graph event] %s", list(event.keys()))
+            for node_name, update in event.items():
+                if node_name == "classify":
+                    classify_data = update
+                    domains = update.get("domains", [])
+                    is_multi = update.get("is_multi_domain", False)
+                    domain_names = [d["domain"] for d in domains]
+                    yield {
+                        "type": "meta",
+                        "domain": update.get("domain", "综合"),
+                        "domains": domain_names,
+                        "multi_domain": is_multi,
+                    }
+                elif node_name == "generate_sub_questions":
+                    sq = update.get("sub_questions", {})
+                    for d, q in sq.items():
+                        yield {"type": "substep", "step": "sub_question", "domain": d, "question": q}
+                elif node_name == "retrieve_one_domain":
+                    for ctx_item in update.get("retrieved_contexts", []):
+                        yield {"type": "substep", "step": "retrieve", "domain": ctx_item["domain"]}
+                elif node_name == "direct_retrieve":
+                    graph_result = update
+                elif node_name == "merge_contexts":
+                    graph_result = update
+    except Exception as e:
+        logger.warning("[graph] 异常: %s", e)
+        if not graph_result:
+            yield {"type": "error", "message": f"检索过程出错: {e}"}
+            return
 
+    # 如果事件流中没拿到 merge/direct 结果，用 ainvoke 拿最终状态
     if graph_result is None:
-        # 获取最终状态
-        final_state = await graph.ainvoke(graph_input)
-        graph_result = final_state
+        logger.info("[graph] 未捕获最终节点，调用 ainvoke 获取状态...")
+        graph_result = await graph.ainvoke(graph_input)
+        logger.info("[graph] ainvoke 完成")
 
     # 从图结果中提取上下文
     context_text = graph_result.get("context_text", "")
     reranked_docs = graph_result.get("reranked_docs", [])
     domain = graph_result.get("domain", "综合")
-    is_multi = graph_result.get("is_multi_domain", False)
+    is_multi = classify_data.get("is_multi_domain", False) if classify_data else graph_result.get("is_multi_domain", False)
+    logger.info("[graph] context=%s chars, docs=%s, multi=%s", len(context_text), len(reranked_docs), is_multi)
 
     # 选择 prompt
     if is_multi:
@@ -756,9 +904,8 @@ async def _ask_stream_graph(
         }
     else:
         prompt = QA_PROMPT
-        contextualized_q = _contextualize_query(
-            llm, _get_session_history(session_id).messages, question
-        )
+        # 使用图中已完成的 query 重写结果，避免重复 LLM 调用
+        contextualized_q = graph_result.get("contextualized_question", question)
         stream_input = {
             "question": contextualized_q,
             "context": context_text,
@@ -772,12 +919,41 @@ async def _ask_stream_graph(
         **stream_input,
     )
 
+    import asyncio
     answer_parts = []
-    async for chunk in llm.astream(messages):
-        content = chunk.content if hasattr(chunk, "content") else str(chunk)
-        if content:
-            answer_parts.append(content)
-            yield {"type": "token", "content": content}
+    stream_start = asyncio.get_event_loop().time()
+    total_timeout = 180  # 整个流式生成最多 180s
+    token_timeout = 60   # 首 token / 单 token 超时 60s
+    try:
+        stream_iter = llm.astream(messages).__aiter__()
+        while True:
+            elapsed = asyncio.get_event_loop().time() - stream_start
+            remaining = total_timeout - elapsed
+            if remaining <= 0:
+                logger.warning("[流式生成] 总计 %ss 超时，中断", total_timeout)
+                if answer_parts:
+                    break
+                yield {"type": "error", "message": "回答生成超时，请简化问题后重试"}
+                return
+            try:
+                chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=min(token_timeout, remaining))
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                logger.warning("[流式生成] %ss 无新 token，中断（已生成 %s 个 token）", token_timeout, len(answer_parts))
+                if answer_parts:
+                    break  # 已有内容，正常结束
+                yield {"type": "error", "message": "回答生成超时，请简化问题后重试"}
+                return
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if content:
+                answer_parts.append(content)
+                yield {"type": "token", "content": content}
+    except Exception as e:
+        logger.error("[流式生成] 异常: %s", e)
+        if not answer_parts:
+            yield {"type": "error", "message": f"生成中断: {e}"}
+            return
 
     # 保存对话历史
     answer_text = "".join(answer_parts)
@@ -789,7 +965,26 @@ async def _ask_stream_graph(
     # 格式化来源 + 引用校验
     article_index = components.get("article_index", {})
     sources = _format_sources(reranked_docs, answer=answer_text)
-    sources = _verify_citations(sources, article_index)
+    sources = _verify_citations_semantic(
+        sources, article_index,
+        answer=answer_text,
+        reranked_docs=reranked_docs,
+        enable_semantic=components.get("enable_semantic_verification", False),
+    )
+
+    # 案例检索（概览类问题跳过，领域与案例库不匹配时也跳过）
+    case_results = []
+    case_searcher = components.get("case_searcher")
+    if case_searcher and case_searcher.available and not _is_overview_question(question):
+        case_top_k = components.get("case_top_k", 3)
+        # 检查案例库是否覆盖当前领域
+        available_domains = components.get("case_available_domains", set())
+        if available_domains and domain and domain != "综合" and not any(
+            d in domain or domain in d for d in available_domains
+        ):
+            logger.info("[案例检索] 领域 '%s' 不在案例库覆盖范围 %s，跳过", domain, available_domains)
+        else:
+            case_results = case_searcher.search(question, top_k=case_top_k, domain=domain)
 
     yield {
         "type": "done",
@@ -797,4 +992,5 @@ async def _ask_stream_graph(
         "risk_warning": RISK_WARNING,
         "domain": domain,
         "multi_domain": is_multi,
+        "case_results": case_results,
     }

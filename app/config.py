@@ -152,6 +152,52 @@ class Settings:
     multi_domain_max_domains: int = field(
         default_factory=lambda: int(os.getenv("MULTI_DOMAIN_MAX_DOMAINS", "3"))
     )
+    # 多域加权合并：按 reranker 分数 + 领域优先级排序合并结果
+    enable_weighted_merge: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_WEIGHTED_MERGE", "false").lower() == "true"
+    )
+    # 领域优先级顺序（逗号分隔，排在前面的优先级越高）
+    domain_priority_order: str = field(
+        default_factory=lambda: os.getenv("DOMAIN_PRIORITY_ORDER", "刑事,行政,治安,监察")
+    )
+    # 上下文智能拓展：用 LLM 判断候选法条相关性，过滤无关条文
+    enable_intelligent_expansion: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_INTELLIGENT_EXPANSION", "false").lower() == "true"
+    )
+    # 拓展深度：0=纯规则, 1=标准, 2=深度
+    expansion_depth: int = field(
+        default_factory=lambda: int(os.getenv("EXPANSION_DEPTH", "1"))
+    )
+    # 引用语义溯源：向量库验证引用准确性 + 检测遗漏引用
+    enable_semantic_verification: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_SEMANTIC_VERIFICATION", "false").lower() == "true"
+    )
+
+    # --- 案例检索 ---
+    # 是否启用案例库检索：开启后在回答末尾展示相似案例
+    enable_case_retrieval: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_CASE_RETRIEVAL", "true").lower() == "true"
+    )
+    # 案例数据库路径（SQLite）
+    case_db_path: str = field(
+        default_factory=lambda: os.getenv("CASE_DB_PATH", "./data/CaseMatch/cases.sqlite3")
+    )
+    # 案例检索返回条数
+    case_top_k: int = field(
+        default_factory=lambda: int(os.getenv("CASE_TOP_K", "3"))
+    )
+    # 是否启用案例语义检索（LanceDB + Embedding）
+    case_use_semantic: bool = field(
+        default_factory=lambda: os.getenv("CASE_USE_SEMANTIC", "true").lower() == "true"
+    )
+    # LanceDB 案例向量库目录
+    case_lancedb_dir: str = field(
+        default_factory=lambda: os.getenv("CASE_LANCEDB_DIR", "./data/CaseMatch/lancedb")
+    )
+    # 语义检索候选数
+    case_vector_top_k: int = field(
+        default_factory=lambda: int(os.getenv("CASE_VECTOR_TOP_K", "5"))
+    )
 
     # --- 记忆压缩 ---
     # 滑动窗口保留最近 N 轮对话（1 轮 = 用户提问 + 助手回答）
@@ -183,6 +229,20 @@ class Settings:
     # 压缩调试日志：开启后在控制台打印压缩过程（轮数、token 估算、摘要长度等）
     memory_compression_debug: bool = field(
         default_factory=lambda: os.getenv("MEMORY_COMPRESSION_DEBUG", "false").lower() == "true"
+    )
+
+    # --- 语义缓存 ---
+    enable_semantic_cache: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_SEMANTIC_CACHE", "true").lower() == "true"
+    )
+    semantic_cache_threshold: float = field(
+        default_factory=lambda: float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.92"))
+    )
+    semantic_cache_ttl: int = field(
+        default_factory=lambda: int(os.getenv("SEMANTIC_CACHE_TTL", "72"))
+    )
+    semantic_cache_max_items: int = field(
+        default_factory=lambda: int(os.getenv("SEMANTIC_CACHE_MAX_ITEMS", "1000"))
     )
 
 

@@ -9,6 +9,7 @@ ChromaDB 向量存储管理模块。
 """
 
 import hashlib
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -17,6 +18,8 @@ from typing import List
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_chroma import Chroma
+
+logger = logging.getLogger(__name__)
 
 
 def _compute_data_hash(data_dir: str) -> str:
@@ -75,7 +78,7 @@ def build_vectorstore(
         embedding=embeddings,
         persist_directory=persist_dir,
     )
-    print(f"向量库构建完成，{len(docs)} 个 chunk 已存入 {persist_dir}")
+    logger.info("向量库构建完成，%d 个 chunk 已存入 %s", len(docs), persist_dir)
 
     # 保存数据指纹，用于后续判断是否需要重建
     if data_dir:
@@ -103,7 +106,7 @@ def load_vectorstore(
         embedding_function=embeddings,
         persist_directory=persist_dir,
     )
-    print(f"向量库已从 {persist_dir} 加载")
+    logger.info("向量库已从 %s 加载", persist_dir)
     return vectorstore
 
 
@@ -137,11 +140,11 @@ def get_or_create_vectorstore(
             current_hash = _compute_data_hash(data_dir)
             stored_hash = _read_stored_hash(persist_dir)
             if current_hash and stored_hash and current_hash != stored_hash:
-                print("检测到 data/ 目录文件变化，重新构建向量库...")
+                logger.info("检测到 data/ 目录文件变化，重新构建向量库...")
                 return build_vectorstore(docs, embeddings, persist_dir, data_dir)
 
-        print("检测到已有向量库，直接加载...")
+        logger.info("检测到已有向量库，直接加载...")
         return load_vectorstore(embeddings, persist_dir)
     else:
-        print("向量库不存在，开始构建...")
+        logger.info("向量库不存在，开始构建...")
         return build_vectorstore(docs, embeddings, persist_dir, data_dir)

@@ -4,9 +4,12 @@
 领域配置从 law_registry.yaml 加载，新增法律只需编辑该 YAML 文件。
 """
 
+import logging
 from typing import Dict, List
 from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
+
+logger = logging.getLogger(__name__)
 
 from app.law_registry import (
     load_domain_law_map,
@@ -110,7 +113,7 @@ def classify_question_multi(
     primary = domains[0]["domain"]
     is_multi = len(domains) > 1 and primary != "综合"
 
-    print(f"  [多域分类] {raw} → domains={[d['domain'] for d in domains]}, multi={is_multi}")
+    logger.info("[多域分类] %s → domains=%s, multi=%s", raw, [d['domain'] for d in domains], is_multi)
 
     return {
         "domains": domains,

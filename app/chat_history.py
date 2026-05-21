@@ -17,10 +17,12 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chat_history.db")
+_DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "db")
+DB_PATH = os.path.join(_DB_DIR, "chat_history.db")
 
 
 def _get_conn() -> sqlite3.Connection:
+    os.makedirs(_DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -36,13 +38,16 @@ def init_db():
                 question TEXT NOT NULL,
                 answer TEXT NOT NULL,
                 sources TEXT NOT NULL DEFAULT '[]',
+                domain TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             )
         """)
-        # 兼容旧表：如果缺少 session_id 列则添加
+        # 兼容旧表：如果缺少列则添加
         cols = [r[1] for r in conn.execute("PRAGMA table_info(chat_history)").fetchall()]
         if "session_id" not in cols:
             conn.execute("ALTER TABLE chat_history ADD COLUMN session_id TEXT NOT NULL DEFAULT 'default'")
+        if "domain" not in cols:
+            conn.execute("ALTER TABLE chat_history ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
         # 会话元数据表（置顶等）
         conn.execute("""
             CREATE TABLE IF NOT EXISTS session_meta (
@@ -53,12 +58,12 @@ def init_db():
         conn.commit()
 
 
-def save_record(session_id: str, question: str, answer: str, sources: List[Dict[str, str]]) -> int:
+def save_record(session_id: str, question: str, answer: str, sources: List[Dict[str, str]], domain: str = "") -> int:
     """保存一条问答记录，关联到指定会话。"""
     with _get_conn() as conn:
         cursor = conn.execute(
-            "INSERT INTO chat_history (session_id, question, answer, sources, created_at) VALUES (?, ?, ?, ?, ?)",
-            (session_id, question, answer, json.dumps(sources, ensure_ascii=False), datetime.now().isoformat()),
+            "INSERT INTO chat_history (session_id, question, answer, sources, domain, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, question, answer, json.dumps(sources, ensure_ascii=False), domain, datetime.now().isoformat()),
         )
         conn.commit()
         return cursor.lastrowid
@@ -142,6 +147,7 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "question": row["question"],
         "answer": row["answer"],
         "sources": json.loads(row["sources"]),
+        "domain": row["domain"] if "domain" in row.keys() else "",
         "created_at": row["created_at"],
     }
 

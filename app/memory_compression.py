@@ -7,9 +7,12 @@
   Layer 3 - Token 裁剪：超出预算时从最老的轮次开始丢弃
 """
 
+import logging
 import os
 import warnings
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -141,7 +144,7 @@ def compress_messages(
     """
     def log(msg: str):
         if debug:
-            print(f"  [记忆压缩] {msg}")
+            logger.info("[记忆压缩] %s", msg)
 
     # 分离摘要消息和普通消息
     existing_summary = _find_summary_message(messages)
