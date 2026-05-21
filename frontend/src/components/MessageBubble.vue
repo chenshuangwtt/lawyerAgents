@@ -1,5 +1,5 @@
 <script setup>
-import { computed, inject } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { marked } from 'marked'
 import SourceCard from './SourceCard.vue'
 
@@ -10,9 +10,14 @@ const props = defineProps({
   domain: { type: String, default: '' },
   domains: { type: Array, default: () => [] },
   risk_warning: { type: String, default: '' },
+  case_results: { type: Array, default: () => [] },
+  cached: { type: Boolean, default: false },
   time: String,
   streaming: { type: Boolean, default: false },
 })
+
+// 案例卡片展开状态
+const expandedCases = ref({})
 
 const html = computed(() => {
   if (!props.content && !props.streaming) return ''
@@ -50,6 +55,19 @@ const domainBadges = computed(() => {
   }
   return []
 })
+
+function caseTitle(c) {
+  // 优先用罪名做可读标题，title 和 case_id 一样时显示罪名
+  if (c.charges_text && c.title !== c.charges_text) {
+    return `${c.charges_text}案`
+  }
+  if (c.title && c.title !== c.case_id) return c.title
+  return c.charges_text || c.case_id || '案例'
+}
+
+function toggleCase(ci) {
+  expandedCases.value[ci] = !expandedCases.value[ci]
+}
 </script>
 
 <template>
@@ -77,7 +95,7 @@ const domainBadges = computed(() => {
         <span
           v-for="badge in domainBadges"
           :key="badge.name"
-          class="text-xs px-2 py-0.5 rounded-md font-medium ring-1 ring-inset"
+          class="text-xs px-2.5 py-1 rounded-lg font-semibold ring-1 ring-inset shadow-sm"
           :class="badge.color"
         >
           {{ badge.name }}
@@ -99,12 +117,59 @@ const domainBadges = computed(() => {
         <SourceCard :sources="sources" />
       </div>
 
+      <!-- 相似案例 -->
+      <div v-if="case_results.length > 0" class="mt-3">
+        <div class="flex items-center gap-1.5 mb-2">
+          <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+          </svg>
+          <span class="text-xs font-semibold text-gray-500">相似案例参考</span>
+        </div>
+        <div class="space-y-2">
+          <div
+            v-for="(c, ci) in case_results"
+            :key="ci"
+            class="bg-indigo-50/60 border border-indigo-100 rounded-xl px-4 py-3 cursor-pointer hover:bg-indigo-50 transition-colors"
+            @click="toggleCase(ci)"
+          >
+            <div class="flex items-center justify-between mb-1">
+              <div class="text-xs font-semibold text-indigo-600">{{ caseTitle(c) }}</div>
+              <svg
+                class="w-3.5 h-3.5 text-gray-400 transition-transform shrink-0"
+                :class="{ 'rotate-180': expandedCases[ci] }"
+                fill="none" stroke="currentColor" viewBox="0 0 24 24"
+              >
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </div>
+            <div v-if="c.case_summary" class="text-xs text-gray-600 leading-relaxed" :class="{ 'line-clamp-2': !expandedCases[ci] }">{{ c.case_summary }}</div>
+            <template v-if="expandedCases[ci]">
+              <div v-if="c.dispute_focus" class="text-xs text-gray-500 mt-1.5">
+                <span class="font-medium">争议焦点：</span>{{ c.dispute_focus }}
+              </div>
+              <div v-if="c.court_reasoning" class="text-xs text-gray-500 mt-1">
+                <span class="font-medium">裁判要点：</span>{{ c.court_reasoning }}
+              </div>
+            </template>
+            <div v-if="!expandedCases[ci] && (c.dispute_focus || c.court_reasoning)" class="text-xs text-indigo-400 mt-1">点击展开详情</div>
+          </div>
+        </div>
+      </div>
+
       <!-- 风险提示 -->
       <div v-if="risk_warning" class="mt-2 flex items-start gap-1.5 px-1">
         <svg class="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/>
         </svg>
         <span class="text-xs text-gray-400 leading-relaxed">{{ risk_warning }}</span>
+      </div>
+
+      <!-- 来自缓存 -->
+      <div v-if="cached" class="mt-1.5 flex items-center gap-1 px-1">
+        <svg class="w-3 h-3 text-emerald-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+        </svg>
+        <span class="text-xs text-emerald-400">来自缓存</span>
       </div>
     </div>
   </div>
@@ -115,7 +180,7 @@ const domainBadges = computed(() => {
   display: inline-block;
   width: 2px;
   height: 1.1em;
-  background-color: #3b82f6;
+  background-color: oklch(0.58 0.16 255);
   border-radius: 1px;
   margin-left: 1px;
   vertical-align: text-bottom;

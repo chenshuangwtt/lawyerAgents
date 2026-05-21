@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getSessions, deleteSession, togglePinSession } from '../api.js'
+import { getSessions, deleteSession, togglePinSession, exportSession } from '../api.js'
 
 const props = defineProps({ sessionId: String })
 const emit = defineEmits(['newSession', 'close', 'selectSession'])
@@ -51,9 +51,9 @@ defineExpose({ refresh: loadSessions })
 </script>
 
 <template>
-  <aside class="bg-gray-950 text-white flex flex-col h-full w-64">
+  <aside class="bg-gray-50 text-gray-800 flex flex-col h-full w-64 border-r border-gray-200">
     <!-- Logo -->
-    <div class="px-4 py-4 border-b border-gray-800/60">
+    <div class="px-4 py-4 border-b border-gray-200">
       <div class="flex items-center gap-2.5">
         <div class="w-8 h-8 rounded-xl bg-linear-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-600/10">
           <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -61,8 +61,8 @@ defineExpose({ refresh: loadSessions })
           </svg>
         </div>
         <div>
-          <h1 class="text-sm font-bold tracking-wide">法律顾问</h1>
-          <p class="text-[10px] text-gray-500">AI 智能法律咨询</p>
+          <h1 class="text-sm font-bold tracking-wide text-gray-800">法律顾问</h1>
+          <p class="text-[10px] text-gray-400">AI 智能法律咨询</p>
         </div>
       </div>
     </div>
@@ -71,7 +71,7 @@ defineExpose({ refresh: loadSessions })
     <div class="p-3">
       <button
         @click="onAddSession"
-        class="w-full py-2 rounded-xl bg-white/7 hover:bg-white/12 text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2 text-gray-300 hover:text-white border border-white/6"
+        class="w-full py-2 rounded-xl bg-white hover:bg-gray-100 text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2 text-gray-600 hover:text-gray-800 border border-gray-200 hover:border-gray-300"
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
@@ -82,46 +82,55 @@ defineExpose({ refresh: loadSessions })
 
     <!-- 会话列表 -->
     <nav class="flex-1 overflow-y-auto px-2 space-y-0.5">
-      <p v-if="sessions.length === 0" class="text-gray-600 text-xs px-3 py-8 text-center">
+      <p v-if="sessions.length === 0" class="text-gray-400 text-xs px-3 py-8 text-center">
         暂无会话
       </p>
       <div
         v-for="s in sessions"
         :key="s.session_id"
         @click="emit('selectSession', s.session_id)"
-        class="group px-3 py-2.5 rounded-xl text-sm cursor-pointer transition-all relative"
+        class="group px-3 py-2.5 rounded-xl text-sm cursor-pointer transition-all"
         :class="s.session_id === sessionId
-          ? 'bg-white/8 text-white'
-          : 'text-gray-500 hover:bg-white/5 hover:text-gray-300'"
+          ? 'bg-blue-50 text-gray-800 border border-blue-100'
+          : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700 border border-transparent'"
       >
+        <!-- 标题行：标题 + 置顶/导出 -->
         <div class="flex items-center gap-2">
-          <span v-if="s.pinned" class="w-1 h-1 bg-amber-400 rounded-full shrink-0"></span>
-          <div class="truncate font-medium text-[13px]">{{ s.title }}</div>
+          <span v-if="s.pinned" class="w-1.5 h-1.5 bg-amber-400 rounded-full shrink-0"></span>
+          <div class="truncate font-medium text-[13px] flex-1">{{ s.title }}</div>
+          <div class="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              @click="onTogglePin($event, s.session_id)"
+              class="w-6 h-6 rounded flex items-center justify-center transition-all cursor-pointer"
+              :class="s.pinned ? 'text-amber-500 hover:bg-amber-50' : 'text-gray-400 hover:text-amber-500 hover:bg-amber-50'"
+              :title="s.pinned ? '取消置顶' : '置顶'"
+            >
+              <svg class="w-3.5 h-3.5" :fill="s.pinned ? 'currentColor' : 'none'" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"/>
+              </svg>
+            </button>
+            <button
+              @click="exportSession(s.session_id)"
+              class="w-6 h-6 rounded flex items-center justify-center text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-all cursor-pointer"
+              title="导出 Markdown"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+              </svg>
+            </button>
+          </div>
         </div>
-        <div class="flex items-center gap-1.5 text-[11px] text-gray-600 mt-0.5">
+        <!-- 元信息行：时间 + 删除 -->
+        <div class="flex items-center gap-1.5 text-[11px] text-gray-400 mt-0.5">
           <span>{{ s.msg_count }} 条</span>
           <span>·</span>
           <span>{{ formatTime(s.last_time) }}</span>
-        </div>
-
-        <!-- 操作按钮 -->
-        <div class="absolute top-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            @click="onTogglePin($event, s.session_id)"
-            class="w-6 h-6 rounded-md flex items-center justify-center transition-all cursor-pointer"
-            :class="s.pinned ? 'text-amber-400 hover:bg-white/10' : 'text-gray-600 hover:text-amber-400 hover:bg-white/10'"
-            :title="s.pinned ? '取消置顶' : '置顶'"
-          >
-            <svg class="w-3.5 h-3.5" :fill="s.pinned ? 'currentColor' : 'none'" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"/>
-            </svg>
-          </button>
           <button
             @click="onDelete($event, s.session_id)"
-            class="w-6 h-6 rounded-md flex items-center justify-center text-gray-600 hover:text-red-400 hover:bg-white/10 transition-all cursor-pointer"
+            class="ml-auto w-5 h-5 rounded flex items-center justify-center opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all cursor-pointer"
             title="删除"
           >
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
             </svg>
           </button>

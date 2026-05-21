@@ -1,11 +1,12 @@
 <script setup>
-import { ref, watch, nextTick } from 'vue'
-import { sendMessageStream } from '../api.js'
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { sendMessageStream, getLaws } from '../api.js'
 import MessageBubble from './MessageBubble.vue'
 
 const props = defineProps({
   sessionId: String,
   messages: Array,
+  sessionLoading: Boolean,
 })
 const emit = defineEmits(['toggleSidebar', 'messageSent'])
 
@@ -14,13 +15,33 @@ const loading = ref(false)
 const atBottom = ref(true)
 const showBackBottom = ref(false)
 const textareaRef = ref(null)
+const isAutoScrolling = ref(false)
 
 const suggestions = [
   { label: '劳动纠纷', q: '劳动合同的试用期最长是多久？试用期工资怎么算？' },
   { label: '婚姻家庭', q: '离婚时夫妻共同财产如何分割？' },
+  { label: '刑事犯罪', q: '入室盗窃价值三万元财物，会被判几年？' },
+  { label: '网络诈骗', q: '在网上被骗了五万块钱，该怎么报警追回？' },
   { label: '工伤维权', q: '工伤认定后能获得哪些赔偿？' },
+  { label: '交通事故', q: '交通事故对方全责不赔偿怎么办？' },
   { label: '合同纠纷', q: '合同违约金的标准是多少？' },
+  { label: '消费维权', q: '买到假货商家不退不换怎么办？' },
 ]
+
+// 领域选择器
+const domains = ref([])
+onMounted(async () => {
+  try {
+    const res = await getLaws()
+    domains.value = res.domains || []
+  } catch { /* ignore */ }
+})
+
+function onDomainClick(d) {
+  const law = d.laws[0] || ''
+  const q = law ? `我想了解${law}的相关法律规定` : `我想了解${d.name}相关的法律问题`
+  onSuggestion(q)
+}
 
 // --- 智能滚动 ---
 function chatEl() { return document.getElementById('chat-list') }
@@ -28,28 +49,55 @@ function chatEl() { return document.getElementById('chat-list') }
 function isNearBottom(el) {
   return !el || el.scrollHeight - el.scrollTop - el.clientHeight <= 16
 }
+
+let scrollTimeout = null
 function scrollBottom() {
   const el = chatEl()
-  if (el) el.scrollTop = el.scrollHeight
+  if (!el) return
+  isAutoScrolling.value = true
+  el.scrollTop = el.scrollHeight
+  clearTimeout(scrollTimeout)
+  scrollTimeout = setTimeout(() => { isAutoScrolling.value = false }, 150)
 }
+
 function onChatScroll() {
+  if (isAutoScrolling.value) return
   const el = chatEl()
   if (!el) return
   atBottom.value = isNearBottom(el)
   showBackBottom.value = !atBottom.value && props.messages.length > 0
 }
+
 function backToBottom() {
   const el = chatEl()
-  if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  if (!el) return
+  isAutoScrolling.value = true
+  el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  clearTimeout(scrollTimeout)
+  scrollTimeout = setTimeout(() => { isAutoScrolling.value = false }, 350)
   atBottom.value = true
   showBackBottom.value = false
 }
+
+// MutationObserver 兜底：DOM 变化时自动滚动
+let observer = null
+onMounted(() => {
+  const el = chatEl()
+  if (!el) return
+  observer = new MutationObserver(() => {
+    if (atBottom.value && !isAutoScrolling.value) {
+      requestAnimationFrame(scrollBottom)
+    }
+  })
+  observer.observe(el, { childList: true, subtree: true, characterData: true })
+})
+onUnmounted(() => { observer?.disconnect(); clearTimeout(scrollTimeout) })
 
 watch(
   () => [props.messages.length, loading.value],
   async () => {
     await nextTick()
-    if (atBottom.value) scrollBottom()
+    if (atBottom.value) requestAnimationFrame(scrollBottom)
     if (!atBottom.value && props.messages.length > 0) showBackBottom.value = true
   },
   { flush: 'post' }
@@ -69,7 +117,7 @@ async function onSend() {
 
   props.messages.push({ role: 'user', content: q, time: new Date().toLocaleTimeString() })
   await nextTick()
-  scrollBottom()
+  requestAnimationFrame(scrollBottom)
   atBottom.value = true
 
   // 预占 assistant 消息位
@@ -81,6 +129,8 @@ async function onSend() {
     domain: '',
     domains: [],
     risk_warning: '',
+    case_results: [],
+    cached: false,
     time: new Date().toLocaleTimeString(),
     streaming: true,
     substeps: [],
@@ -94,6 +144,7 @@ async function onSend() {
         if (msg) {
           msg.domain = data.domain || '综合'
           msg.domains = data.domains || [data.domain || '综合']
+          if (data.cached) msg.cached = true
         }
       },
       onSubstep(data) {
@@ -106,8 +157,8 @@ async function onSend() {
         const msg = props.messages[msgIndex]
         if (msg) {
           msg.content += data.content
-          // 流式期间持续滚动
-          if (atBottom.value) scrollBottom()
+          // 流式期间持续滚动（用 rAF 确保在 DOM 更新后执行）
+          if (atBottom.value) requestAnimationFrame(scrollBottom)
         }
       },
       onDone(data) {
@@ -115,13 +166,15 @@ async function onSend() {
         if (msg) {
           msg.sources = data.sources || []
           msg.risk_warning = data.risk_warning || ''
+          msg.case_results = data.case_results || []
+          if (data.cached) msg.cached = true
           msg.streaming = false
         }
       },
       onError(message) {
         const msg = props.messages[msgIndex]
         if (msg) {
-          msg.content = '抱歉，服务暂时不可用，请稍后重试。'
+          msg.content = message || '服务暂时不可用，请稍后重试'
           msg.streaming = false
         }
       },
@@ -129,7 +182,7 @@ async function onSend() {
   } catch {
     const msg = props.messages[msgIndex]
     if (msg) {
-      msg.content = '抱歉，服务暂时不可用，请稍后重试。'
+      msg.content = '网络连接中断，请重试'
       msg.streaming = false
     }
   } finally {
@@ -183,7 +236,7 @@ watch(() => input.value, () => nextTick(adjustHeight))
       :class="messages.length === 0 ? 'flex items-center justify-center' : 'px-4 py-6'"
     >
       <!-- 欢迎页 -->
-      <div v-if="messages.length === 0" class="w-full max-w-xl mx-auto px-6">
+      <div v-if="messages.length === 0 && !sessionLoading" class="w-full max-w-xl mx-auto px-6">
         <div class="text-center mb-10">
           <div class="w-20 h-20 mx-auto mb-5 rounded-3xl bg-linear-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-xl shadow-blue-600/15">
             <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -194,6 +247,21 @@ watch(() => input.value, () => nextTick(adjustHeight))
           <p class="text-gray-500 text-sm leading-relaxed max-w-sm mx-auto">
             基于中国法律文书构建的专业咨询系统<br/>引用法条原文，提供准确法律分析
           </p>
+        </div>
+
+        <div v-if="domains.length > 0" class="mb-6">
+          <p class="text-xs text-gray-400 mb-2.5 text-center">选择法律领域快速提问</p>
+          <div class="flex flex-wrap justify-center gap-2">
+            <button
+              v-for="d in domains"
+              :key="d.name"
+              @click="onDomainClick(d)"
+              class="px-3 py-1.5 rounded-lg text-xs font-semibold ring-1 ring-inset cursor-pointer transition-all hover:shadow-md hover:scale-105"
+              :class="d.color"
+            >
+              {{ d.name }}
+            </button>
+          </div>
         </div>
 
         <div class="grid grid-cols-2 gap-3">
@@ -208,12 +276,25 @@ watch(() => input.value, () => nextTick(adjustHeight))
           </button>
         </div>
 
-        <p class="text-center text-xs text-gray-300 mt-8">
+        <p class="text-center text-xs text-gray-400 mt-8">
           本系统提供的法律建议仅供参考，不构成正式法律意见
         </p>
       </div>
 
       <!-- 消息列表 -->
+      <div v-else-if="sessionLoading" class="max-w-3xl mx-auto px-4 py-6 space-y-6">
+        <div v-for="n in 3" :key="n" class="animate-pulse">
+          <div class="flex justify-end mb-3">
+            <div class="h-8 bg-gray-200 rounded-2xl w-48"></div>
+          </div>
+          <div class="space-y-2">
+            <div class="h-4 bg-gray-100 rounded w-full"></div>
+            <div class="h-4 bg-gray-100 rounded w-5/6"></div>
+            <div class="h-4 bg-gray-100 rounded w-2/3"></div>
+          </div>
+        </div>
+      </div>
+
       <div v-else class="max-w-3xl mx-auto">
         <MessageBubble
           v-for="(msg, i) in messages"
@@ -224,6 +305,8 @@ watch(() => input.value, () => nextTick(adjustHeight))
           :domain="msg.domain"
           :domains="msg.domains"
           :risk_warning="msg.risk_warning"
+          :case_results="msg.case_results"
+          :cached="msg.cached"
           :time="msg.time"
           :streaming="msg.streaming"
         />
