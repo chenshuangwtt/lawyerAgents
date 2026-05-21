@@ -7,6 +7,8 @@
 
 ## 配置
 
+### 多域协作
+
 系统通过 `MULTI_DOMAIN_MAX_DOMAINS` 控制多域并行检索的最大领域数。
 
 | 位置 | 说明 |
@@ -19,6 +21,23 @@
 **生效方式**：修改 `.env` 后重启后端服务即可，无需改代码。
 
 **成本考量**：每个领域并行执行一次完整检索（BM25 + 向量 + Rerank），领域越多 token 消耗越高，响应延迟取决于最慢的分支。建议取值 2\~4。
+
+### 三项优化（默认关闭）
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `ENABLE_WEIGHTED_MERGE` | `false` | 多域加权合并：按领域优先级排序结果（如刑事优先于行政） |
+| `DOMAIN_PRIORITY_ORDER` | `刑事,行政,治安,监察` | 领域优先级顺序（逗号分隔） |
+| `ENABLE_INTELLIGENT_EXPANSION` | `false` | 上下文智能拓展：LLM Sub Agent 判断候选条文相关性 |
+| `EXPANSION_DEPTH` | `1` | 拓展深度：0=关闭 / 1=标准 / 2=深度 |
+| `ENABLE_SEMANTIC_VERIFICATION` | `true` | 引用语义溯源：标注置信度 + 检测遗漏引用 |
+| `ENABLE_CASE_RETRIEVAL` | `true` | 案例检索：刑事类问题展示相似案例参考 |
+| `CASE_USE_SEMANTIC` | `true` | 案例语义检索（LanceDB，首次启动自动构建向量库） |
+| `CASE_TOP_K` | `3` | 案例检索返回条数 |
+
+案例检索会按领域自动过滤（如治安问题不返回刑事案例），概览/示例类问题跳过案例检索。
+
+四个优化开关独立，可单独开启测试。关闭时行为与原版完全一致。语义溯源和案例检索默认开启。
 
 ---
 
@@ -165,7 +184,7 @@
 - 刑事：受贿罪
 - 行政：违法行政许可的撤销与复议
 
-### 6. 劳动 + 未成年人 + 民事诉讼（已测试）
+### 6. 劳动 + 未成年人 + 民事诉讼
 **问题：** 16 岁少年冒用他人身份证入职后遭遇工伤，公司发现后拒绝赔偿并报警，家长该怎么办？
 **预期领域：** 劳动、未成年人、民事诉讼
 **相关法律：** 劳动合同法、未成年人保护法、民事诉讼法
@@ -214,6 +233,59 @@
 
 ---
 
+## 案例检索
+
+> CaseMatch 案例库基于 LeCaRD 刑事裁判文书数据集，覆盖盗窃、故意伤害、诈骗、
+> 危险驾驶、走私等常见罪名。案例检索作为法律条文检索的**补充参考**，在回答
+> 末尾以「相似案例参考」卡片展示（含案例摘要、法院说理、争议焦点）。
+>
+> 案例检索支持领域过滤：按查询领域（如"治安"）自动匹配案例库中的 `legal_domain`，
+> 避免跨领域案例干扰。概览/示例类问题（含"了解""法律规定""示例"等关键词）自动跳过案例检索。
+
+### 1. 盗窃罪 — 量刑参考
+
+**问题：** 入室盗窃价值三万元财物，会被判几年？
+**预期领域：** 刑事
+**相关法律：** 刑法
+**验证要点：** 回答末尾出现「相似案例参考」，案例应涉及盗窃罪，含法院量刑说理
+
+### 2. 故意伤害罪 — 轻伤认定
+
+**问题：** 因口角纠纷将人打成轻伤二级，对方不谅解，会怎么判？
+**预期领域：** 刑事
+**相关法律：** 刑法
+**验证要点：** 案例应涉及故意伤害 + 轻伤伤情等级 + 量刑考量
+
+### 3. 诈骗罪 — 网络诈骗
+
+**问题：** 在网上发布虚假商品信息骗取多人货款共计五万元，构成什么罪？判多久？
+**预期领域：** 刑事
+**相关法律：** 刑法
+**验证要点：** 案例应涉及诈骗罪，可能含电信网络诈骗相关情节
+
+### 4. 危险驾驶罪 — 醉驾
+
+**问题：** 醉酒驾驶血液酒精含量 180mg/100ml，没有造成事故，会怎么处理？
+**预期领域：** 刑事
+**相关法律：** 刑法
+**验证要点：** 案例应涉及危险驾驶罪 + 血液酒精含量与量刑的关系
+
+### 5. 掩饰隐瞒犯罪所得罪 — 收赃
+
+**问题：** 明知是盗窃来的手机还以低价收购，会构成犯罪吗？
+**预期领域：** 刑事
+**相关法律：** 刑法
+**验证要点：** 案例应涉及掩饰、隐瞒犯罪所得罪 + "明知"的认定标准
+
+### 6. 走私罪 — 走私普通货物
+
+**问题：** 从国外代购奢侈品入境未申报，金额超过十万元，会被追究刑事责任吗？
+**预期领域：** 刑事
+**相关法律：** 刑法
+**验证要点：** 案例应涉及走私普通货物罪 + 偷逃税额计算
+
+---
+
 ## 测试方法
 
 ### 1. 流式接口测试
@@ -223,6 +295,11 @@
 curl -N http://localhost:8080/api/chat/stream \
   -H "Content-Type: application/json" \
   -d '{"question": "被人殴打成轻微伤，对方会被治安拘留还是判刑？", "session_id": "test"}'
+
+# 测试案例检索（刑事类）
+curl -N http://localhost:8080/api/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "入室盗窃价值三万元财物，会被判几年？", "session_id": "test_case"}'
 ```
 
 ### 2. Python 脚本测试（避免 Windows 编码问题）
@@ -230,6 +307,7 @@ curl -N http://localhost:8080/api/chat/stream \
 ```python
 import json, urllib.request
 
+# 测试多域问题
 body = json.dumps({
     "question": "16岁少年冒用他人身份证入职后遭遇工伤，公司发现后拒绝赔偿并报警，家长该怎么办？",
     "session_id": "test_3domain"
@@ -250,6 +328,36 @@ for raw_line in resp:
         current_event = None
 ```
 
+```python
+# 测试案例检索（仅打印 case_results）
+import json, urllib.request
+
+body = json.dumps({
+    "question": "在网上发布虚假商品信息骗取多人货款共计五万元，构成什么罪？判多久？",
+    "session_id": "test_case"
+}, ensure_ascii=False).encode("utf-8")
+
+req = urllib.request.Request("http://localhost:8080/api/chat/stream", data=body,
+    headers={"Content-Type": "application/json"})
+resp = urllib.request.urlopen(req, timeout=120)
+
+current_event = None
+for raw_line in resp:
+    line = raw_line.decode("utf-8").strip()
+    if line.startswith("event: "):
+        current_event = line[7:]
+    elif line.startswith("data: ") and current_event:
+        data = json.loads(line[6:])
+        if current_event == "done":
+            cases = data.get("case_results", [])
+            print(f"[案例检索] 命中 {len(cases)} 条：")
+            for c in cases:
+                print(f"  - {c.get('title', c.get('case_id', '?'))}")
+                print(f"    罪名: {c.get('charges_text', '-')}")
+                print(f"    摘要: {(c.get('case_summary', '') or '')[:80]}...")
+        current_event = None
+```
+
 ### 3. 观察服务日志
 
 | 日志标记 | 含义 |
@@ -259,11 +367,21 @@ for raw_line in resp:
 | `[sub_question]` | 为每个领域生成的子问题 |
 | `[retrieve_one_domain]` | 某个领域的并行检索完成 |
 | `[merge_contexts]` | 多域检索结果合并去重 |
+| `[混合检索]` | BM25 + 向量 RRF 融合结果数 |
+| `[Rerank]` | Rerank 精排前后数量 |
 | `[流式输出]` | LLM 流式回答开始 |
+| `[案例库]` | 案例库加载状态（启动时） |
+| `SQLite 已加载` | FTS5 案例库就绪 |
+| `LanceDB 已加载` | 语义案例库就绪（首次启动显示"从 SQLite 构建中"） |
+| `case_results` | `done` 事件中的 `case_results` 字段，有值即案例检索生效 |
 
 ### 4. 前端验证
 
-打开 `http://localhost:5173`，发送多域问题后观察：
-- AI 消息头部显示多个领域标签（如 `劳动` `未成年人` `民事诉讼`）
-- 回答按领域分段分析，标注各领域关联性
-- 法条来源卡片包含多个法律的引用
+打开 `http://localhost:5173`，发送问题后观察：
+- 欢迎页显示 14 个领域选择卡片（点击自动发送对应问题）
+- 示例问题 8 条，点击直接发送
+- AI 消息头部显示领域标签（如 `刑事`、`劳动` `未成年人` `民事诉讼`）
+- 多域问题回答按领域分段分析，标注各领域关联性
+- 法条来源卡片包含多个法律的引用，法律名可点击跳转 flk.npc.gov.cn
+- **刑事类问题**回答末尾出现「相似案例参考」折叠卡片，展示案例摘要、法院说理
+- 侧边栏会话 hover 显示下载按钮，点击导出 Markdown 文件

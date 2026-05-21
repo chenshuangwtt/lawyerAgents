@@ -11,9 +11,13 @@ venv/
 chroma_db/
 models_cache/
 
+# 案例库（通过 scripts/download_cases.py 获取）
+data/CaseMatch/
+
 # 运行时数据
-chat_history.db
+data/db/
 *.log
+logs/
 
 # 环境变量（含 API Key，勿提交）
 .env
