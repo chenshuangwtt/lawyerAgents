@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { sendMessageStream, getLaws, sendDocumentStream } from '../api.js'
+import { sendMessageStream, getLaws, sendDocumentStream, submitFeedback } from '../api.js'
 import MessageBubble from './MessageBubble.vue'
 
 const props = defineProps({
@@ -133,6 +133,8 @@ async function onSend() {
     cached: false,
     intent: '',
     case_state: null,
+    record_id: null,
+    feedback: null,
     time: new Date().toLocaleTimeString(),
     streaming: true,
     substeps: [],
@@ -176,6 +178,7 @@ async function onSend() {
           msg.risk_warning = data.risk_warning || ''
           msg.case_results = data.case_results || []
           if (data.case_state) msg.case_state = data.case_state
+          if (data.record_id) msg.record_id = data.record_id
           if (data.cached) msg.cached = true
           msg.streaming = false
         }
@@ -278,6 +281,12 @@ function onGenerateDocument({ document_type, case_state }) {
       emit('messageSent')
     },
   })
+}
+
+function onFeedback({ record_id, feedback }) {
+  const msg = props.messages.find(m => m.record_id === record_id)
+  if (msg) msg.feedback = feedback
+  submitFeedback(record_id, feedback).catch(() => {})
 }
 
 function onKeydown(e) {
@@ -399,7 +408,10 @@ watch(() => input.value, () => nextTick(adjustHeight))
           :substeps="msg.substeps"
           :intent="msg.intent"
           :case_state="msg.case_state"
+          :record_id="msg.record_id"
+          :feedback="msg.feedback"
           @generateDocument="onGenerateDocument"
+          @feedback="onFeedback"
         />
       </div>
     </div>

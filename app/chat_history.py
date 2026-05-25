@@ -106,6 +106,8 @@ def _init_sqlite(conn):
         conn.execute("ALTER TABLE chat_history ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
     if "case_state" not in cols:
         conn.execute("ALTER TABLE chat_history ADD COLUMN case_state TEXT")
+    if "feedback" not in cols:
+        conn.execute("ALTER TABLE chat_history ADD COLUMN feedback INTEGER")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS session_meta (
             session_id TEXT PRIMARY KEY,
@@ -394,3 +396,40 @@ def toggle_pin(session_id: str) -> bool:
                 (session_id,),
             ).fetchone()
             return bool(row["pinned"]) if row else False
+
+
+def save_feedback(record_id: int, feedback: int) -> bool:
+    """
+    保存用户反馈。
+
+    Args:
+        record_id: 记录 ID
+        feedback: 1（有用）或 -1（没用）
+
+    Returns:
+        是否更新成功
+    """
+    if feedback not in (1, -1):
+        return False
+
+    with _lock:
+        if USE_PG:
+            conn = _get_pg_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE chat_history SET feedback = %s WHERE id = %s",
+                    (feedback, record_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            cursor = conn.execute(
+                "UPDATE chat_history SET feedback = ? WHERE id = ?",
+                (feedback, record_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0

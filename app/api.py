@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from app.chat_history import (
     save_record, get_sessions, get_session_records,
-    toggle_pin, delete_session as db_delete,
+    toggle_pin, delete_session as db_delete, save_feedback,
 )
 from app.law_registry import load_domain_colors, load_registry
 from app.rag_chain import ask, ask_stream
@@ -266,7 +266,7 @@ async def chat_stream(request: ChatRequest):
             if cached:
                 yield f"event: meta\ndata: {json.dumps({'domain': cached.get('domain', '综合'), 'cached': True}, ensure_ascii=False)}\n\n"
                 yield f"event: token\ndata: {json.dumps({'content': cached['answer']}, ensure_ascii=False)}\n\n"
-                save_record(
+                record_id = save_record(
                     session_id=request.session_id,
                     question=request.question,
                     answer=cached["answer"],
@@ -279,6 +279,7 @@ async def chat_stream(request: ChatRequest):
                     "domain": cached.get("domain", "综合"),
                     "case_results": cached.get("case_results", []),
                     "cached": True,
+                    "record_id": record_id,
                 }
                 yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
                 return
@@ -363,7 +364,7 @@ async def chat_stream(request: ChatRequest):
             elif event_type == "done":
                 sources = event.get("sources", [])
                 risk_warning = event.get("risk_warning", "")
-                save_record(
+                record_id = save_record(
                     session_id=request.session_id,
                     question=request.question,
                     answer=answer_text,
@@ -384,6 +385,7 @@ async def chat_stream(request: ChatRequest):
                 done_data = {
                     "sources": sources,
                     "risk_warning": risk_warning,
+                    "record_id": record_id,
                 }
                 if "domain" in event:
                     done_data["domain"] = event["domain"]
@@ -462,6 +464,23 @@ async def generate_document(request: DocumentRequest):
                 yield f"event: error\ndata: {json.dumps({'message': event['message']}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+class FeedbackRequest(BaseModel):
+    """用户反馈请求体。"""
+    record_id: int = Field(..., description="记录 ID")
+    feedback: int = Field(..., description="反馈：1（有用）或 -1（没用）")
+
+
+@app.post("/api/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """提交用户反馈（有用/没用）。"""
+    if request.feedback not in (1, -1):
+        raise HTTPException(status_code=400, detail="feedback 必须是 1 或 -1")
+    ok = save_feedback(request.record_id, request.feedback)
+    if not ok:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return {"ok": True}
 
 
 @app.get("/api/sessions", response_model=SessionListResponse)

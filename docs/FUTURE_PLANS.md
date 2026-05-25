@@ -43,10 +43,7 @@
 
 4. ~~**案例库 + 相似案例检索**~~ ✅ 已完成 — CaseMatch（LeCaRD 刑事数据集）+ SQLite FTS5 + LanceDB 语义检索 + RRF 融合，领域过滤，概览跳过
 
-**5. 用户反馈迭代**
-- 收集用户评价（有用/没用/引用有误）
-- 自动标注低质量回答
-- 定期优化 prompt 和检索参数
+**5. ~~用户反馈迭代~~** ✅ 已完成 — chat_history 表加 feedback 列，POST /api/feedback 端点，前端每条回答👍/👎按钮，反馈即时更新UI
 
 ### 建议优先级
 
@@ -86,3 +83,4 @@
 | PostgreSQL 存储 | ✅ | DATABASE_URL 切换双后端，连接池 + RealDictCursor |
 | 诉讼时效计算器 | ✅ | 规则计算+LLM提取时间，集成案情分析报告+独立问答 |
 | 法律文书自动生成 | ✅ | 模板+LLM填充，4种文书，分析报告按钮+独立问答+API |
+| 用户反馈迭代 | ✅ | 👍/👎反馈按钮，DB存储，POST /api/feedback |

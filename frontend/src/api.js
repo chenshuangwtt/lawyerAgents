@@ -119,6 +119,11 @@ export function getLaws() {
   return http.get('/laws').then(r => r.data)
 }
 
+/** 提交用户反馈 */
+export function submitFeedback(recordId, feedback) {
+  return http.post('/feedback', { record_id: recordId, feedback }).then(r => r.data)
+}
+
 /** 生成法律文书（流式 SSE） */
 export async function sendDocumentStream(documentType, { case_state, sessionId, extra_info }, { onMeta, onToken, onDone, onError, onSubstep }) {
   try {
