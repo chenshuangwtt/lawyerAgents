@@ -14,6 +14,7 @@ const props = defineProps({
   cached: { type: Boolean, default: false },
   time: String,
   streaming: { type: Boolean, default: false },
+  substeps: { type: Array, default: () => [] },
 })
 
 // 案例卡片展开状态
@@ -68,6 +69,21 @@ function caseTitle(c) {
 function toggleCase(ci) {
   expandedCases.value[ci] = !expandedCases.value[ci]
 }
+
+function stepLabel(step) {
+  const labels = {
+    classify: '分类',
+    retrieve: '检索',
+    rerank: '精排',
+    expand: '扩展',
+    merge: '合并',
+    generate: '生成',
+    sub_questions: '拆题',
+    sub_question: '拆题',
+    contextualize: '重写',
+  }
+  return labels[step] || step
+}
 </script>
 
 <template>
@@ -105,6 +121,19 @@ function toggleCase(ci) {
           生成中
         </span>
         <span class="text-xs text-gray-300 ml-auto">{{ time }}</span>
+      </div>
+
+      <!-- 进度时间线 -->
+      <div v-if="substeps.length > 0" class="flex items-center gap-1 mb-2 flex-wrap">
+        <template v-for="(s, si) in substeps" :key="si">
+          <span
+            class="text-xs px-1.5 py-0.5 rounded-md"
+            :class="s.step === 'generate' && streaming ? 'bg-blue-50 text-blue-500 animate-pulse' : 'bg-gray-100 text-gray-400'"
+          >
+            {{ stepLabel(s.step) }} {{ s.elapsed_ms > 0 ? (s.elapsed_ms / 1000).toFixed(1) + 's' : '' }}
+          </span>
+          <span v-if="si < substeps.length - 1" class="text-gray-300 text-xs">→</span>
+        </template>
       </div>
 
       <!-- 内容卡片 -->

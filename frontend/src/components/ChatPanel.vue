@@ -149,8 +149,13 @@ async function onSend() {
       },
       onSubstep(data) {
         const msg = props.messages[msgIndex]
-        if (msg && data.step === 'retrieve') {
-          msg.substeps.push(data.domain)
+        if (msg) {
+          msg.substeps.push({
+            step: data.step || '',
+            elapsed_ms: data.elapsed_ms || 0,
+            detail: data.detail || '',
+            domain: data.domain || '',
+          })
         }
       },
       onToken(data) {
@@ -309,6 +314,7 @@ watch(() => input.value, () => nextTick(adjustHeight))
           :cached="msg.cached"
           :time="msg.time"
           :streaming="msg.streaming"
+          :substeps="msg.substeps"
         />
       </div>
     </div>
