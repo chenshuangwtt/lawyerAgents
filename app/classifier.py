@@ -28,6 +28,17 @@ _DOMAIN_KEYWORDS: Dict[str, List[str]] = load_domain_keywords()
 # 带权重的关键词（用于快速分类）
 _WEIGHTED_KEYWORDS: Dict[str, Dict[str, float]] = load_domain_weighted_keywords()
 
+# 案情分析意图关键词
+_ANALYSIS_KEYWORDS = [
+    "分析案情", "帮我分析", "分析一下", "案情分析",
+    "起诉", "怎么告", "能告吗", "可以告吗",
+    "维权", "怎么维权", "如何维权",
+    "仲裁", "申请仲裁", "劳动仲裁",
+    "赔偿", "能赔多少", "赔偿多少",
+    "官司", "打官司", "胜诉", "赢面",
+    "诉讼", "提起诉讼", "去法院",
+]
+
 
 def classify_by_keywords(question: str) -> tuple:
     """
@@ -65,6 +76,19 @@ def classify_by_keywords(question: str) -> tuple:
     confidence = min(best_score / max_single, 1.0)
 
     return (best_domain, round(confidence, 3))
+
+
+def classify_intent(question: str) -> str:
+    """
+    判断用户意图：qa（法律问题）或 analysis（案情分析）。
+    关键词快速匹配，不调 LLM。
+    """
+    if len(question.strip()) < 20:
+        return "qa"
+    for kw in _ANALYSIS_KEYWORDS:
+        if kw in question:
+            return "analysis"
+    return "qa"
 
 
 # 分类提示词（从 YAML 动态生成）
@@ -188,6 +212,7 @@ def classify_question_multi(
                 "is_multi_domain": is_multi,
                 "confidence": top_confidence,
                 "method": "keyword",
+                "intent": classify_intent(question),
             }
 
     # 2. LLM 兜底
@@ -225,6 +250,7 @@ def classify_question_multi(
             "is_multi_domain": is_multi,
             "confidence": 0.6,
             "method": "llm",
+            "intent": classify_intent(question),
         }
     except Exception as e:
         logger.warning("[多域分类] LLM 失败: %s", e)
@@ -234,4 +260,5 @@ def classify_question_multi(
             "is_multi_domain": False,
             "confidence": 0.0,
             "method": "fallback",
+            "intent": "qa",
         }
