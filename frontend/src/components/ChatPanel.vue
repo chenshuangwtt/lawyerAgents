@@ -131,6 +131,7 @@ async function onSend() {
     risk_warning: '',
     case_results: [],
     cached: false,
+    intent: '',
     time: new Date().toLocaleTimeString(),
     streaming: true,
     substeps: [],
@@ -145,6 +146,7 @@ async function onSend() {
           msg.domain = data.domain || '综合'
           msg.domains = data.domains || [data.domain || '综合']
           if (data.cached) msg.cached = true
+          if (data.intent) msg.intent = data.intent
         }
       },
       onSubstep(data) {
@@ -315,6 +317,7 @@ watch(() => input.value, () => nextTick(adjustHeight))
           :time="msg.time"
           :streaming="msg.streaming"
           :substeps="msg.substeps"
+          :intent="msg.intent"
         />
       </div>
     </div>

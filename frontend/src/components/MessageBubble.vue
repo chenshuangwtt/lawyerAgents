@@ -15,6 +15,7 @@ const props = defineProps({
   time: String,
   streaming: { type: Boolean, default: false },
   substeps: { type: Array, default: () => [] },
+  intent: { type: String, default: '' },
 })
 
 // 案例卡片展开状态
@@ -81,6 +82,8 @@ function stepLabel(step) {
     sub_questions: '拆题',
     sub_question: '拆题',
     contextualize: '重写',
+    decompose: '案情拆解',
+    cross_analyze: '交叉分析',
   }
   return labels[step] || step
 }
@@ -115,6 +118,12 @@ function stepLabel(step) {
           :class="badge.color"
         >
           {{ badge.name }}
+        </span>
+        <span
+          v-if="intent === 'analysis'"
+          class="text-xs px-2.5 py-1 rounded-lg font-semibold ring-1 ring-inset shadow-sm bg-amber-50 text-amber-600 ring-amber-200"
+        >
+          案情分析
         </span>
         <span v-if="streaming" class="text-xs text-blue-400 flex items-center gap-1">
           <span class="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse"></span>
