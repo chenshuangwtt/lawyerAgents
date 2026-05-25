@@ -10,7 +10,7 @@
 
 ```
 用户提问
-  → 问题分类（LLM 判断领域，14 选 1）
+  → 问题分类（关键词快速分类 ≥0.7 置信度直接返回，否则 LLM 兜底，14 选 1）
   → Query 重写（结合多轮历史，补全口语化表述）
   → 混合检索（BM25 关键词 + 向量语义，RRF 融合，司法解释补充）
   → Rerank 精排（DashScope gte-rerank-v2，top-6，返回相关性分数）
@@ -20,7 +20,7 @@
   → 返回 answer + sources（含 confidence） + risk_warning
 ```
 
-单域问题零额外开销，走原有管道。
+单域问题零额外开销，走原有管道。关键词高置信度命中时分类 0ms 延迟。
 
 ### 多域路径（LangGraph 并行检索）
 
@@ -36,15 +36,17 @@
 
 每个检索分支独立执行完整管道（混合检索 → Rerank → 上下文扩展），结果通过加权合并（可选）或去重拼接后统一生成。
 
+多域分类由 `classify_question_multi` 处理，关键词优先 + LLM 兜底，与单域路径的 `classify_question` 独立。
+
 单域问题不走图，直接走原有快速路径（零额外开销）。
 
 ### 流式输出协议（SSE）
 
 ```
 event: meta       → 领域信息 + 多域标记
-event: substep    → 子问题生成 / 检索进度（多域时触发）
+event: substep    → pipeline 进度（elapsed_ms + detail），含分类/检索/精排/扩展/生成各阶段
 event: token      → LLM 逐 token 输出
-event: done       → 最终来源 + 风险提示
+event: done       → 最终来源 + 风险提示 + timings
 ```
 
 ### 记忆机制
