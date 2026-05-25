@@ -38,13 +38,15 @@ def create_llm(settings: Settings):
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
         )
-    else:
+    elif settings.llm_provider in ("openai", "openai_compatible"):
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=settings.openai_chat_model,
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
         )
+    else:
+        raise ValueError(f"不支持的 LLM 提供商: {settings.llm_provider}")
 
 
 def load_test_cases(path: str) -> list:
@@ -84,7 +86,30 @@ def run_evaluation(test_cases: list, llm, verbose: bool = False) -> dict:
         tags = case.get("tags", [])
 
         start = time.perf_counter()
-        prediction = classify_question(llm, question)
+        try:
+            prediction = classify_question(llm, question)
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            result = {
+                "id": case_id,
+                "question": question,
+                "expected_domain": expected_domain,
+                "predicted_domain": "ERROR",
+                "method": "error",
+                "confidence": 0.0,
+                "is_correct": False,
+                "elapsed_ms": round(elapsed_ms, 1),
+                "error": str(e),
+            }
+            results.append(result)
+            failures.append(result)
+            total_time += elapsed_ms
+            domain_stats[expected_domain]["total"] += 1
+            for tag in tags:
+                tag_stats[tag]["total"] += 1
+            if verbose:
+                print(f"  [ERR] #{case_id} 预期:{expected_domain} 错误: {e}")
+            continue
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         predicted_domain = prediction["domain"]
