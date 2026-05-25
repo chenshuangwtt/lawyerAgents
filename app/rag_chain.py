@@ -1164,3 +1164,119 @@ async def _ask_stream_graph(
         "case_state": new_case_state,
         "timings": _graph_timings,
     }
+
+
+async def ask_analysis_stream(
+    analysis_graph,
+    llm: BaseChatModel,
+    question: str,
+    session_id: str = "default",
+    components: Optional[Dict] = None,
+):
+    """
+    案情分析流式输出。使用 astream 实时推送每个图节点的进度。
+
+    Yields:
+        {"type": "meta", "intent": "analysis", "domain": str}  — 元信息
+        {"type": "substep", "step": str, ...}                  — 进度
+        {"type": "token", "content": str}                      — 逐 token 输出
+        {"type": "done", "sources": [...], ...}                — 结束信号
+        {"type": "error", "message": str}                      — 错误
+    """
+    if components is None:
+        components = {}
+
+    try:
+        yield {"type": "meta", "intent": "analysis", "domain": "综合"}
+
+        graph_input = {
+            "user_input": question,
+            "session_id": session_id,
+            "claims": [],
+            "claim_contexts": [],
+            "cross_analysis": "",
+            "report": "",
+            "sources": [],
+            "case_results": [],
+        }
+
+        # 使用 astream 实时获取每个节点的更新
+        graph_result = {}
+        all_claims = []
+        async for event in analysis_graph.astream(graph_input, stream_mode="updates"):
+            for node_name, update in event.items():
+                _t = time.perf_counter()
+                if node_name == "decompose":
+                    all_claims = update.get("claims", [])
+                    decompose_ms = round((time.perf_counter() - _t) * 1000)
+                    if not all_claims:
+                        yield {"type": "substep", "step": "decompose", "elapsed_ms": decompose_ms,
+                               "detail": "未提取到主张"}
+                        yield {"type": "error", "message": "未能从案情中提取到明确的法律主张，请补充更多细节。"}
+                        return
+                    yield {"type": "substep", "step": "decompose", "elapsed_ms": decompose_ms,
+                           "detail": f"提取 {len(all_claims)} 个主张"}
+                elif node_name == "retrieve_one_claim":
+                    ctx_items = update.get("claim_contexts", [])
+                    claim_name = ctx_items[0]["claim_text"][:20] if ctx_items else "?"
+                    yield {"type": "substep", "step": "retrieve", "elapsed_ms": round((time.perf_counter() - _t) * 1000),
+                           "detail": f"检索：{claim_name}..."}
+                elif node_name == "cross_analyze":
+                    yield {"type": "substep", "step": "cross_analyze",
+                           "elapsed_ms": round((time.perf_counter() - _t) * 1000),
+                           "detail": "交叉分析完成"}
+                elif node_name == "generate_report":
+                    graph_result = update
+
+        # 如果事件流中没拿到 generate_report 结果，用 ainvoke 获取
+        if not graph_result:
+            graph_result = await analysis_graph.ainvoke(graph_input)
+            all_claims = graph_result.get("claims", [])
+
+        report = graph_result.get("report", "")
+        sources = graph_result.get("sources", [])
+        case_results = graph_result.get("case_results", [])
+
+        if not report:
+            yield {"type": "error", "message": "报告生成失败。"}
+            return
+
+        # 流式输出报告
+        yield {"type": "substep", "step": "generate", "elapsed_ms": 0, "detail": "生成报告"}
+        _t_gen = time.perf_counter()
+        for line in report.split("\n"):
+            if line.strip():
+                yield {"type": "token", "content": line + "\n"}
+        gen_ms = round((time.perf_counter() - _t_gen) * 1000)
+
+        # 保存对话历史
+        from langchain_core.messages import HumanMessage, AIMessage
+        history_obj = _get_session_history(session_id)
+        history_obj.add_messages([
+            HumanMessage(content=question),
+            AIMessage(content=report),
+        ])
+
+        # 构建 case_state（含 claims 信息）
+        new_case_state = json.dumps({
+            "parties": [],
+            "dispute_type": all_claims[0].get("domain", "") if all_claims else "",
+            "key_facts": [c["claim_text"] for c in all_claims[:3]],
+            "stage": "案情分析",
+            "domain_history": list(set(c.get("domain", "") for c in all_claims if c.get("domain"))),
+            "claims": [{"claim_text": c["claim_text"], "domain": c.get("domain", ""), "verdict": ""} for c in all_claims],
+        }, ensure_ascii=False)
+
+        yield {
+            "type": "done",
+            "sources": sources,
+            "risk_warning": RISK_WARNING,
+            "domain": all_claims[0].get("domain", "综合") if all_claims else "综合",
+            "case_results": case_results,
+            "case_state": new_case_state,
+            "timings": {"generate": gen_ms},
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        yield {"type": "error", "message": f"案情分析出错: {e}"}
