@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 from app.law_registry import (
     load_domain_law_map,
     load_domain_keywords,
+    load_domain_weighted_keywords,
     load_classify_prompt_text,
     load_multi_classify_prompt_text,
 )
@@ -23,6 +24,48 @@ DOMAIN_LAW_MAP: Dict[str, List[str]] = load_domain_law_map()
 
 # 领域关键词（用于 LLM 返回格式异常时的 fallback 匹配）
 _DOMAIN_KEYWORDS: Dict[str, List[str]] = load_domain_keywords()
+
+# 带权重的关键词（用于快速分类）
+_WEIGHTED_KEYWORDS: Dict[str, Dict[str, float]] = load_domain_weighted_keywords()
+
+
+def classify_by_keywords(question: str) -> tuple:
+    """
+    关键词快速分类，返回 (domain, confidence)。
+
+    计算方式：对每个领域，累加命中关键词的权重，取最高分。
+    confidence >= 0.7 表示高置信度，可跳过 LLM。
+    """
+    if not question.strip():
+        return ("综合", 0.0)
+
+    scores = {}
+    for domain, kw_weights in _WEIGHTED_KEYWORDS.items():
+        if domain == "综合":
+            continue
+        score = 0.0
+        matched_count = 0
+        for kw, weight in kw_weights.items():
+            if kw in question:
+                score += weight
+                matched_count += 1
+        if matched_count > 0:
+            # 多关键词匹配有加成
+            score *= (1 + 0.1 * (matched_count - 1))
+            scores[domain] = score
+
+    if not scores:
+        return ("综合", 0.0)
+
+    best_domain = max(scores, key=scores.get)
+    best_score = scores[best_domain]
+
+    # 归一化：用该领域最高单关键词权重作为基准
+    max_single = max(_WEIGHTED_KEYWORDS[best_domain].values())
+    confidence = min(best_score / max_single, 1.0)
+
+    return (best_domain, round(confidence, 3))
+
 
 # 分类提示词（从 YAML 动态生成）
 _CLASSIFY_PROMPT = ChatPromptTemplate.from_messages([
