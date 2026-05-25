@@ -433,3 +433,27 @@ def save_feedback(record_id: int, feedback: int) -> bool:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+
+def get_last_case_state(session_id: str) -> Optional[str]:
+    """获取指定会话最近一条记录的 case_state（不加载其他字段）。"""
+    with _lock:
+        if USE_PG:
+            conn = _get_pg_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT case_state FROM chat_history WHERE session_id = %s AND case_state IS NOT NULL ORDER BY id DESC LIMIT 1",
+                    (session_id,),
+                )
+                row = cur.fetchone()
+                return row["case_state"] if row else None
+            finally:
+                _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            row = conn.execute(
+                "SELECT case_state FROM chat_history WHERE session_id = ? AND case_state IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            return row["case_state"] if row else None

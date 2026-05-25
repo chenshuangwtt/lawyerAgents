@@ -15,8 +15,46 @@ export function sendMessage(question, sessionId = 'default') {
   return http.post('/chat', { question, session_id: sessionId }).then(r => r.data)
 }
 
+/**
+ * 解析 SSE 流的公共逻辑。
+ * @param {ReadableStreamDefaultReader} reader
+ * @param {object} callbacks - { onMeta, onToken, onDone, onError, onSubstep }
+ * @returns {boolean} 是否有内容输出
+ */
+async function parseSSEStream(reader, { onMeta, onToken, onDone, onError, onSubstep }) {
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let hasContent = false
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop()
+
+    let eventType = null
+    for (const line of lines) {
+      if (line.startsWith('event: ')) {
+        eventType = line.slice(7).trim()
+      } else if (line.startsWith('data: ') && eventType) {
+        const data = JSON.parse(line.slice(6))
+        if (eventType === 'meta') onMeta?.(data)
+        else if (eventType === 'token') { onToken?.(data); hasContent = true }
+        else if (eventType === 'done') onDone?.(data)
+        else if (eventType === 'substep') onSubstep?.(data)
+        else if (eventType === 'error') onError?.(data.message)
+        eventType = null
+      }
+    }
+  }
+
+  return hasContent
+}
+
 /** 发送法律咨询问题（流式 SSE，支持自动重试） */
-export async function sendMessageStream(question, sessionId, { onMeta, onToken, onDone, onError, onSubstep }) {
+export async function sendMessageStream(question, sessionId, callbacks) {
   const MAX_RETRIES = 2
   let lastError = null
 
@@ -36,52 +74,25 @@ export async function sendMessageStream(question, sessionId, { onMeta, onToken, 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
         lastError = err.detail || '请求失败'
-        continue // 重试
+        continue
       }
 
       const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let hasContent = false
-
       try {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-
-          const lines = buffer.split('\n')
-          buffer = lines.pop()
-
-          let eventType = null
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim()
-            } else if (line.startsWith('data: ') && eventType) {
-              const data = JSON.parse(line.slice(6))
-              if (eventType === 'meta') onMeta?.(data)
-              else if (eventType === 'token') { onToken?.(data); hasContent = true }
-              else if (eventType === 'done') onDone?.(data)
-              else if (eventType === 'substep') onSubstep?.(data)
-              else if (eventType === 'error') onError?.(data.message)
-              eventType = null
-            }
-          }
-        }
+        const hasContent = await parseSSEStream(reader, callbacks)
         return // 成功，退出
       } catch {
-        // 连接中断：已有内容则正常结束
         if (hasContent) return
         lastError = '响应中断'
-        continue // 无内容则重试
+        continue
       }
     } catch {
       lastError = '网络连接失败'
-      continue // 重试
+      continue
     }
   }
 
-  onError?.(lastError || '服务暂时不可用，请稍后重试')
+  callbacks.onError?.(lastError || '服务暂时不可用，请稍后重试')
 }
 
 /** 获取会话列表 */
@@ -125,7 +136,7 @@ export function submitFeedback(recordId, feedback) {
 }
 
 /** 生成法律文书（流式 SSE） */
-export async function sendDocumentStream(documentType, { case_state, sessionId, extra_info }, { onMeta, onToken, onDone, onError, onSubstep }) {
+export async function sendDocumentStream(documentType, { case_state, sessionId, extra_info }, callbacks) {
   try {
     const res = await fetch('/api/document', {
       method: 'POST',
@@ -140,39 +151,13 @@ export async function sendDocumentStream(documentType, { case_state, sessionId, 
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }))
-      onError?.(err.detail || '请求失败')
+      callbacks.onError?.(err.detail || '请求失败')
       return
     }
 
     const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let hasContent = false
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-
-      const lines = buffer.split('\n')
-      buffer = lines.pop()
-
-      let eventType = null
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          eventType = line.slice(7).trim()
-        } else if (line.startsWith('data: ') && eventType) {
-          const data = JSON.parse(line.slice(6))
-          if (eventType === 'meta') onMeta?.(data)
-          else if (eventType === 'token') { onToken?.(data); hasContent = true }
-          else if (eventType === 'done') onDone?.(data)
-          else if (eventType === 'substep') onSubstep?.(data)
-          else if (eventType === 'error') onError?.(data.message)
-          eventType = null
-        }
-      }
-    }
+    await parseSSEStream(reader, callbacks)
   } catch {
-    onError?.('网络连接失败')
+    callbacks.onError?.('网络连接失败')
   }
 }

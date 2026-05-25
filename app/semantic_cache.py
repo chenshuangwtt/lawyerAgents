@@ -29,13 +29,38 @@ logger = logging.getLogger(__name__)
 
 
 def _cosine_similarity(a: List[float], b: List[float]) -> float:
-    """计算两个向量的余弦相似度。"""
+    """计算两个向量的余弦相似度（单条，用于兼容）。"""
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
+def _batch_cosine_similarity(query_vec: List[float], matrix) -> List[float]:
+    """
+    批量计算一个向量与矩阵每行的余弦相似度。
+
+    Args:
+        query_vec: (D,) 查询向量
+        matrix: (N, D) numpy 数组
+
+    Returns:
+        (N,) 相似度列表
+    """
+    import numpy as np
+    q = np.asarray(query_vec, dtype=np.float32)
+    q_norm = np.linalg.norm(q)
+    if q_norm == 0:
+        return [0.0] * len(matrix)
+    # matrix 每行的范数
+    m_norms = np.linalg.norm(matrix, axis=1)
+    # 避免除零
+    denom = m_norms * q_norm
+    denom[denom == 0] = 1e-10
+    sims = matrix @ q / denom
+    return sims.tolist()
 
 
 def _question_hash(question: str) -> str:
@@ -157,16 +182,33 @@ class SemanticCache:
             "SELECT question_hash, embedding, answer, sources, domain, case_results FROM semantic_cache"
         ).fetchall()
 
-        best_sim = 0.0
-        best_row = None
-        best_hash = None
-        for row in rows:
-            cached_vec = _unpack_embedding(row["embedding"])
-            sim = _cosine_similarity(query_vec, cached_vec)
-            if sim > best_sim:
-                best_sim = sim
-                best_row = row
-                best_hash = row["question_hash"]
+        if not rows:
+            return None
+
+        # 批量解包 embedding 并用 numpy 计算余弦相似度
+        try:
+            import numpy as np
+            embeddings_matrix = np.array(
+                [_unpack_embedding(row["embedding"]) for row in rows],
+                dtype=np.float32,
+            )
+            similarities = _batch_cosine_similarity(query_vec, embeddings_matrix)
+            best_idx = int(np.argmax(similarities))
+            best_sim = similarities[best_idx]
+            best_row = rows[best_idx]
+            best_hash = best_row["question_hash"]
+        except ImportError:
+            # numpy 不可用时回退到逐条计算
+            best_sim = 0.0
+            best_row = None
+            best_hash = None
+            for row in rows:
+                cached_vec = _unpack_embedding(row["embedding"])
+                sim = _cosine_similarity(query_vec, cached_vec)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_row = row
+                    best_hash = row["question_hash"]
 
         if best_sim >= self._threshold and best_row:
             self._conn.execute(

@@ -114,12 +114,10 @@ def _format_case_state(case_state_json: str) -> str:
 
 
 def _get_case_state(session_id: str) -> Optional[str]:
-    """从 DB 获取最近一条记录的案情状态。"""
+    """从 DB 获取最近一条记录的案情状态（精准查询，不加载其他字段）。"""
     try:
-        from app.chat_history import get_session_records
-        records = get_session_records(session_id)
-        if records:
-            return records[-1].get("case_state")
+        from app.chat_history import get_last_case_state
+        return get_last_case_state(session_id)
     except Exception:
         pass
     return None
@@ -236,6 +234,7 @@ QA_MULTI_DOMAIN_PROMPT = ChatPromptTemplate.from_messages([
 
 # 按 session_id 存储对话历史
 _session_store: Dict[str, BaseChatMessageHistory] = {}
+_MAX_SESSION_STORE = 200  # 最多缓存的会话数
 
 # 记忆压缩配置（由 build_rag_chain 设置）
 _compression_config: Dict[str, Any] = {}
@@ -278,6 +277,11 @@ class CompressedChatMessageHistory(BaseChatMessageHistory):
 def _get_session_history(session_id: str) -> BaseChatMessageHistory:
     """获取或创建指定 session 的对话历史（带压缩）。"""
     if session_id not in _session_store:
+        # LRU 淘汰：超过上限时删除最早的条目
+        if len(_session_store) >= _MAX_SESSION_STORE:
+            oldest_key = next(iter(_session_store))
+            del _session_store[oldest_key]
+            logger.debug("[会话缓存] 淘汰旧会话: %s", oldest_key)
         llm = _compression_config.get("llm")
         _session_store[session_id] = CompressedChatMessageHistory(llm=llm)
     return _session_store[session_id]

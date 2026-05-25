@@ -13,7 +13,9 @@ FastAPI 服务模块：提供法律顾问 REST API。
 import json
 import asyncio
 import logging
+import os
 from datetime import datetime
+from typing import Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException
@@ -115,7 +117,7 @@ app = FastAPI(
 # 允许跨域访问
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -128,6 +130,71 @@ llm = None
 rag_components = None
 semantic_cache = None
 analysis_graph = None
+
+
+# --- SSE 工具函数 ---
+
+async def _sse_generator(stream, save_fn=None):
+    """
+    共享 SSE 事件生成器。将异步流中的事件转换为 SSE 格式。
+
+    Args:
+        stream: 异步生成器，yield dict 事件（type: meta/substep/token/done/error）
+        save_fn: 可选的保存函数，在 done 事件时调用 save_fn(event) -> record_id
+    """
+    answer_text = ""
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(stream.__anext__(), timeout=15)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                yield ":keepalive\n\n"
+                continue
+
+            event_type = event["type"]
+
+            if event_type == "meta":
+                meta_data = {"domain": event.get("domain", "综合")}
+                if "domains" in event:
+                    meta_data["domains"] = event["domains"]
+                    meta_data["multi_domain"] = event.get("multi_domain", False)
+                if "intent" in event:
+                    meta_data["intent"] = event["intent"]
+                yield f"event: meta\ndata: {json.dumps(meta_data, ensure_ascii=False)}\n\n"
+
+            elif event_type == "substep":
+                yield f"event: substep\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+            elif event_type == "token":
+                answer_text += event["content"]
+                yield f"event: token\ndata: {json.dumps({'content': event['content']}, ensure_ascii=False)}\n\n"
+
+            elif event_type == "done":
+                done_data = {
+                    "sources": event.get("sources", []),
+                    "risk_warning": event.get("risk_warning", ""),
+                }
+                if "domain" in event:
+                    done_data["domain"] = event["domain"]
+                if "multi_domain" in event:
+                    done_data["multi_domain"] = event["multi_domain"]
+                if "case_results" in event:
+                    done_data["case_results"] = event["case_results"]
+                if "case_state" in event:
+                    done_data["case_state"] = event["case_state"]
+                if save_fn:
+                    record_id = save_fn(event, answer_text)
+                    if record_id:
+                        done_data["record_id"] = record_id
+                yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
+
+            elif event_type == "error":
+                yield f"event: error\ndata: {json.dumps({'message': event['message']}, ensure_ascii=False)}\n\n"
+    except Exception as e:
+        logger.error("[SSE] 事件生成异常: %s", e)
+        yield f"event: error\ndata: {json.dumps({'message': str(e)}, ensure_ascii=False)}\n\n"
 
 
 # --- 路由 ---
@@ -424,46 +491,17 @@ async def generate_document(request: DocumentRequest):
     if llm is None:
         raise HTTPException(status_code=503, detail="LLM 尚未初始化")
 
-    async def event_generator():
-        from app.rag_chain import generate_document_from_api
-        stream = generate_document_from_api(
-            llm,
-            document_type=request.document_type,
-            case_state=request.case_state,
-            extra_info=request.extra_info,
-            session_id=request.session_id,
-            components=rag_components,
-        )
+    from app.rag_chain import generate_document_from_api
+    stream = generate_document_from_api(
+        llm,
+        document_type=request.document_type,
+        case_state=request.case_state,
+        extra_info=request.extra_info,
+        session_id=request.session_id,
+        components=rag_components,
+    )
 
-        while True:
-            try:
-                event = await asyncio.wait_for(stream.__anext__(), timeout=15)
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
-                yield ":keepalive\n\n"
-                continue
-
-            event_type = event["type"]
-
-            if event_type == "meta":
-                meta_data = {"domain": event.get("domain", "综合"), "intent": "document"}
-                yield f"event: meta\ndata: {json.dumps(meta_data, ensure_ascii=False)}\n\n"
-            elif event_type == "substep":
-                yield f"event: substep\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-            elif event_type == "token":
-                yield f"event: token\ndata: {json.dumps({'content': event['content']}, ensure_ascii=False)}\n\n"
-            elif event_type == "done":
-                done_data = {
-                    "sources": event.get("sources", []),
-                    "risk_warning": event.get("risk_warning", ""),
-                    "domain": event.get("domain", "综合"),
-                }
-                yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
-            elif event_type == "error":
-                yield f"event: error\ndata: {json.dumps({'message': event['message']}, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(_sse_generator(stream), media_type="text/event-stream")
 
 
 class FeedbackRequest(BaseModel):
