@@ -245,6 +245,34 @@ class Settings:
         default_factory=lambda: int(os.getenv("SEMANTIC_CACHE_MAX_ITEMS", "1000"))
     )
 
+    # --- 热更新白名单 ---
+    HOT_RELOADABLE_FIELDS = {
+        "bm25_top_k", "vector_top_k", "rerank_final_k",
+        "enable_rerank", "adjacent_range",
+        "enable_weighted_merge", "enable_intelligent_expansion",
+        "expansion_depth", "enable_semantic_verification",
+        "enable_case_retrieval", "case_top_k",
+        "multi_domain_max_domains",
+        "enable_semantic_cache", "semantic_cache_threshold",
+    }
+
+    def update(self, updates: dict) -> list[str]:
+        """运行时更新白名单内参数，返回实际更新的字段列表。"""
+        updated = []
+        for k, v in updates.items():
+            if k in self.HOT_RELOADABLE_FIELDS and hasattr(self, k):
+                expected_type = type(getattr(self, k))
+                try:
+                    setattr(self, k, expected_type(v))
+                    updated.append(k)
+                except (ValueError, TypeError):
+                    pass
+        return updated
+
+    def get_hot_config(self) -> dict:
+        """返回所有可热更新参数的当前值。"""
+        return {k: getattr(self, k) for k in self.HOT_RELOADABLE_FIELDS if hasattr(self, k)}
+
 
 # 全局单例配置
 settings = Settings()

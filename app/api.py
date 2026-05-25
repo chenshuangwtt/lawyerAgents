@@ -437,3 +437,20 @@ async def export_session(session_id: str):
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename=\"{filename_ascii}\"; filename*=UTF-8''{quote(filename)}"},
     )
+
+
+@app.get("/api/config")
+async def get_config():
+    """获取当前可热更新的配置参数。"""
+    from app.config import settings
+    return settings.get_hot_config()
+
+
+@app.put("/api/config")
+async def update_config(updates: dict):
+    """运行时更新配置参数（仅白名单内字段生效）。"""
+    from app.config import settings
+    updated = settings.update(updates)
+    if not updated:
+        raise HTTPException(status_code=400, detail="没有有效的配置项被更新")
+    return {"updated": updated, "config": settings.get_hot_config()}
