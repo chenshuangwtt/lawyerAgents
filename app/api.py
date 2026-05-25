@@ -308,6 +308,14 @@ async def chat_stream(request: ChatRequest):
                 request.question, request.session_id,
                 components=rag_components,
             )
+        elif intent == "statute":
+            # --- 诉讼时效路径 ---
+            from app.rag_chain import ask_statute_stream
+            stream = ask_statute_stream(
+                llm,
+                request.question, request.session_id,
+                components=rag_components,
+            )
         else:
             # --- 普通 QA 路径 ---
             stream = ask_stream(

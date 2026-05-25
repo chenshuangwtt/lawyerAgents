@@ -5,6 +5,7 @@
 """
 
 import json
+import re
 import logging
 import time
 from typing import List, Dict, Any, Annotated
@@ -33,6 +34,7 @@ class AnalysisState(TypedDict):
     claims: List[Dict]                      # decompose 输出
     claim_contexts: Annotated[list, operator.add]  # 并行检索 reducer
     cross_analysis: str                     # 交叉分析文本
+    time_nodes: List[Dict]                  # 时间线节点（从交叉分析提取）
     report: str                             # 最终报告
     sources: list
     case_results: list
@@ -92,7 +94,14 @@ CROSS_ANALYZE_PROMPT = """你是一个法律案情分析助手。请对以下各
 2. 是否有遗漏的主张
 3. 法律关系交叉点
 
-输出格式：简洁的分析文本，不要使用 JSON。"""
+如果案情中有明确的时间信息，请在分析末尾追加一行 JSON（用 ```json 包裹）：
+```json
+{{"time_nodes": [{{"date": "YYYY-MM-DD", "event": "事件描述", "domain": "领域", "claim_index": 0}}]}}
+```
+如果案情中没有明确时间信息，输出：
+```json
+{{"time_nodes": []}}
+```"""
 
 REPORT_PROMPT = """你是一位资深中国法律顾问。请根据以下案情分析结果，生成一份结构化法律分析报告。
 
@@ -215,7 +224,7 @@ def retrieve_one_claim(state: dict) -> dict:
 
 
 def cross_analyze(state: AnalysisState) -> dict:
-    """③ 交叉分析：分析主张间关系"""
+    """③ 交叉分析：分析主张间关系，提取时间线"""
     llm = _lightweight_llm or _llm
     claims = state["claims"]
     claim_contexts = state["claim_contexts"]
@@ -237,14 +246,27 @@ def cross_analyze(state: AnalysisState) -> dict:
         claims_with_context=claims_with_context,
     )
 
+    time_nodes = []
     try:
         response = invoke_with_timeout(llm, prompt, timeout=30)
         analysis = response.content if hasattr(response, "content") else str(response)
         logger.info("[交叉分析] 完成，%d 字", len(analysis))
-        return {"cross_analysis": analysis}
+
+        # 提取 time_nodes JSON
+        json_match = re.search(r"```json\s*(\{.*?time_nodes.*?\})\s*```", analysis, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(1))
+                time_nodes = data.get("time_nodes", [])
+                # 从分析文本中移除 JSON 块
+                analysis = analysis[:json_match.start()].rstrip()
+            except json.JSONDecodeError:
+                pass
+
+        return {"cross_analysis": analysis, "time_nodes": time_nodes}
     except Exception as e:
         logger.error("[交叉分析] 失败: %s", e)
-        return {"cross_analysis": "交叉分析暂不可用。"}
+        return {"cross_analysis": "交叉分析暂不可用。", "time_nodes": []}
 
 
 def generate_report(state: AnalysisState) -> dict:
@@ -252,6 +274,7 @@ def generate_report(state: AnalysisState) -> dict:
     claims = state["claims"]
     claim_contexts = state["claim_contexts"]
     cross_analysis = state["cross_analysis"]
+    time_nodes = state.get("time_nodes", [])
 
     claims_analysis = ""
     all_docs = []
@@ -267,6 +290,31 @@ def generate_report(state: AnalysisState) -> dict:
             claims_analysis += f"法律依据摘要：\n{ctx['context_text'][:1000]}\n"
             all_docs.extend(ctx.get("reranked_docs", []))
             all_article_index.update(ctx.get("article_index", {}))
+
+    # 计算时效
+    statute_section = ""
+    if time_nodes:
+        from app.statute import calculate_statute, detect_statute_type, format_statute_table
+        statute_results = []
+        for tn in time_nodes:
+            date = tn.get("date")
+            domain = tn.get("domain", "")
+            event = tn.get("event", "")
+            if not date:
+                continue
+            stype = detect_statute_type(domain + " " + event)
+            if stype:
+                result = calculate_statute(date, stype)
+                if result:
+                    statute_results.append(result)
+        if statute_results:
+            statute_section = "\n⏱️ **时效分析：**\n\n" + format_statute_table(statute_results)
+            expired = [r for r in statute_results if r.is_expired]
+            urgent = [r for r in statute_results if not r.is_expired and r.remaining_days <= 30]
+            if expired:
+                statute_section += f"\n\n⚠️ {'、'.join(r.statute_type for r in expired)}已超过时效期间，建议尽快咨询律师。"
+            if urgent:
+                statute_section += f"\n\n⏰ {'、'.join(r.statute_type for r in urgent)}即将过期，建议尽快采取法律行动。"
 
     case_summary = claims[0].get("claim_text", "") if claims else state["user_input"][:200]
     legal_relationships = "、".join(set(c.get("domain", "") for c in claims if c.get("domain")))
@@ -285,6 +333,16 @@ def generate_report(state: AnalysisState) -> dict:
     except Exception as e:
         logger.error("[报告生成] 失败: %s", e)
         report = "报告生成失败，请稍后重试。"
+
+    # 注入时效分析到"维权路径与时间线"部分
+    if statute_section:
+        insert_point = report.find("### 四")
+        if insert_point != -1:
+            line_end = report.find("\n", insert_point)
+            if line_end != -1:
+                report = report[:line_end+1] + "\n" + statute_section + "\n" + report[line_end+1:]
+        else:
+            report += "\n\n" + statute_section
 
     sources = _format_sources(all_docs, answer=report)
     sources = _verify_citations_semantic(

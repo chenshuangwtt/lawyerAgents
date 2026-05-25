@@ -39,6 +39,14 @@ _ANALYSIS_KEYWORDS = [
     "诉讼", "提起诉讼", "去法院",
 ]
 
+# 诉讼时效意图关键词
+_STATUTE_KEYWORDS = [
+    "诉讼时效", "仲裁时效", "时效期间", "时效多长",
+    "来得及吗", "还来得及", "过期了吗", "过了时效",
+    "时效过了", "超时效", "时效中断", "时效中止",
+    "时效计算", "算一下时效",
+]
+
 
 def classify_by_keywords(question: str) -> tuple:
     """
@@ -80,13 +88,18 @@ def classify_by_keywords(question: str) -> tuple:
 
 def classify_intent(question: str) -> str:
     """
-    判断用户意图：qa（法律问题）或 analysis（案情分析）。
+    判断用户意图：qa / analysis / statute。
     关键词快速匹配，不调 LLM。
     """
-    if len(question.strip()) < 20:
+    q = question.strip()
+    # 时效关键词足够明确，不需要长度过滤
+    for kw in _STATUTE_KEYWORDS:
+        if kw in q:
+            return "statute"
+    if len(q) < 20:
         return "qa"
     for kw in _ANALYSIS_KEYWORDS:
-        if kw in question:
+        if kw in q:
             return "analysis"
     return "qa"
 
