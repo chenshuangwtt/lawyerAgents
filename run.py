@@ -101,6 +101,13 @@ def main():
     components["expansion_depth"] = settings.expansion_depth
     components["enable_semantic_verification"] = settings.enable_semantic_verification
 
+    # 7.5.1 构建案情分析图
+    from app.analysis_graph import set_analysis_components, build_analysis_graph
+    set_analysis_components(retr, llm, lightweight_llm, components)
+    analysis_app = build_analysis_graph()
+    components["analysis_graph"] = analysis_app
+    logger.info("案情分析图构建完成")
+
     # 7.6 初始化案例检索
     if settings.enable_case_retrieval:
         from app.case_loader import CaseSearcher
@@ -125,6 +132,7 @@ def main():
     api.retriever = retr
     api.llm = llm
     api.rag_components = components
+    api.analysis_graph = components.get("analysis_graph")
     logger.info("RAG 链构建完成，已注入 API 模块")
 
     # 7.7 初始化语义缓存
