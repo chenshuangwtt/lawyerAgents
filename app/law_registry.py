@@ -29,10 +29,24 @@ def load_domain_law_map() -> Dict[str, List[str]]:
     return {d["name"]: d.get("laws", []) for d in data["domains"]}
 
 
-def load_domain_keywords() -> Dict[str, List[str]]:
-    """领域 → 关键词列表，供 classifier fallback 使用。"""
+def load_domain_weighted_keywords() -> Dict[str, Dict[str, float]]:
+    """领域 → {关键词: 权重} 映射，供关键词快速分类使用。"""
     data = _load_yaml()
-    return {d["name"]: d.get("keywords", []) for d in data["domains"]}
+    result = {}
+    for d in data["domains"]:
+        wk = d.get("weighted_keywords", {})
+        if wk:
+            result[d["name"]] = wk
+        else:
+            # 兼容旧格式 keywords（权重默认 0.7）
+            result[d["name"]] = {kw: 0.7 for kw in d.get("keywords", [])}
+    return result
+
+
+def load_domain_keywords() -> Dict[str, List[str]]:
+    """领域 → 关键词列表（兼容旧接口）。"""
+    weighted = load_domain_weighted_keywords()
+    return {domain: list(kws.keys()) for domain, kws in weighted.items()}
 
 
 def load_classify_prompt_text() -> str:
