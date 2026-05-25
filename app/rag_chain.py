@@ -896,9 +896,6 @@ async def _ask_stream_graph(
                     sq = update.get("sub_questions", {})
                     for d, q in sq.items():
                         yield {"type": "substep", "step": "sub_question", "domain": d, "question": q}
-                elif node_name == "retrieve_one_domain":
-                    for ctx_item in update.get("retrieved_contexts", []):
-                        yield {"type": "substep", "step": "retrieve", "domain": ctx_item["domain"]}
                 elif node_name == "direct_retrieve":
                     graph_result = update
                 elif node_name == "merge_contexts":
