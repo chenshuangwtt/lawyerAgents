@@ -64,6 +64,8 @@ def _init_db(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE chat_history ADD COLUMN session_id TEXT NOT NULL DEFAULT 'default'")
     if "domain" not in cols:
         conn.execute("ALTER TABLE chat_history ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
+    if "case_state" not in cols:
+        conn.execute("ALTER TABLE chat_history ADD COLUMN case_state TEXT")
     # 会话元数据表（置顶等）
     conn.execute("""
         CREATE TABLE IF NOT EXISTS session_meta (
@@ -74,13 +76,13 @@ def _init_db(conn: sqlite3.Connection):
     conn.commit()
 
 
-def save_record(session_id: str, question: str, answer: str, sources: List[Dict[str, str]], domain: str = "") -> int:
+def save_record(session_id: str, question: str, answer: str, sources: List[Dict[str, str]], domain: str = "", case_state: Optional[str] = None) -> int:
     """保存一条问答记录，关联到指定会话。"""
     with _lock:
         conn = _get_conn()
         cursor = conn.execute(
-            "INSERT INTO chat_history (session_id, question, answer, sources, domain, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, question, answer, json.dumps(sources, ensure_ascii=False), domain, datetime.now().isoformat()),
+            "INSERT INTO chat_history (session_id, question, answer, sources, domain, case_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, question, answer, json.dumps(sources, ensure_ascii=False), domain, case_state, datetime.now().isoformat()),
         )
         conn.commit()
         return cursor.lastrowid
@@ -171,6 +173,7 @@ def _row_to_dict(row) -> Dict[str, Any]:
         "answer": row["answer"],
         "sources": json.loads(row["sources"]),
         "domain": row["domain"] if "domain" in row.keys() else "",
+        "case_state": row["case_state"] if "case_state" in row.keys() else None,
         "created_at": row["created_at"],
     }
 
