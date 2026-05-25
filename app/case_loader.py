@@ -266,7 +266,7 @@ class CaseSearcher:
 
     # 案例库中 legal_domain 的常见值
     _LEGAL_DOMAIN_ALIASES = {
-        "刑事": ["刑事"],
+        "刑事": ["刑事", "criminal"],
         "民事": ["民事"],
         "行政": ["行政", "治安"],
         "劳动": ["劳动"],

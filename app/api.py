@@ -10,11 +10,23 @@ FastAPI 服务模块：提供法律顾问 REST API。
   - DELETE /api/sessions/{id}      删除会话
 """
 
+import json
+import asyncio
+import logging
+from datetime import datetime
+from urllib.parse import quote
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel, Field
-import logging
+
+from app.chat_history import (
+    save_record, get_sessions, get_session_records,
+    toggle_pin, delete_session as db_delete,
+)
+from app.law_registry import load_domain_colors, load_registry
+from app.rag_chain import ask, ask_stream
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +134,6 @@ semantic_cache = None
 @app.get("/api/domains")
 async def get_domains():
     """获取法律领域配置（名称 + 颜色），供前端渲染领域标签。"""
-    from app.law_registry import load_domain_colors
     colors = load_domain_colors()
     return {"domains": [{"name": name, "color": color} for name, color in colors.items()]}
 
@@ -130,7 +141,6 @@ async def get_domains():
 @app.get("/api/laws")
 async def get_laws():
     """获取全部法律领域及其关联法律，供前端领域选择器使用。"""
-    from app.law_registry import load_registry
     registry = load_registry()
     domains = []
     for d in registry.get("domains", []):
@@ -164,8 +174,6 @@ async def chat(request: ChatRequest):
             detail="RAG 链尚未初始化，请等待服务就绪后重试",
         )
 
-    from app.chat_history import save_record
-
     # 语义缓存命中 → 直接返回
     if semantic_cache:
         try:
@@ -192,8 +200,6 @@ async def chat(request: ChatRequest):
             )
 
     try:
-        from app.rag_chain import ask
-
         result = ask(
             rag_chain, retriever, llm,
             request.question, request.session_id,
@@ -246,11 +252,7 @@ async def chat_stream(request: ChatRequest):
             detail="RAG 链尚未初始化，请等待服务就绪后重试",
         )
 
-    import json
-    import asyncio
-
     async def event_generator():
-        from app.chat_history import save_record
 
         # 语义缓存命中 → 模拟流式回放
         if semantic_cache:
@@ -278,8 +280,6 @@ async def chat_stream(request: ChatRequest):
                 }
                 yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
                 return
-
-        from app.rag_chain import ask_stream
 
         answer_text = ""
         sources = []
@@ -358,7 +358,6 @@ async def chat_stream(request: ChatRequest):
 @app.get("/api/sessions", response_model=SessionListResponse)
 async def list_sessions():
     """获取会话列表（按 session_id 分组，每个会话显示第一条问题作为标题）。"""
-    from app.chat_history import get_sessions
     sessions = get_sessions()
     return SessionListResponse(items=[SessionItem(**s) for s in sessions])
 
@@ -366,7 +365,6 @@ async def list_sessions():
 @app.get("/api/sessions/{session_id}", response_model=SessionDetailResponse)
 async def get_session_detail(session_id: str):
     """获取指定会话的全部对话记录，按时间正序排列。"""
-    from app.chat_history import get_session_records
     records = get_session_records(session_id)
     if not records:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
@@ -387,7 +385,6 @@ async def get_session_detail(session_id: str):
 @app.post("/api/sessions/{session_id}/pin")
 async def toggle_pin_session(session_id: str):
     """切换会话置顶状态。"""
-    from app.chat_history import toggle_pin
     pinned = toggle_pin(session_id)
     return {"ok": True, "pinned": pinned}
 
@@ -395,7 +392,6 @@ async def toggle_pin_session(session_id: str):
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
     """删除指定会话及其全部对话记录。"""
-    from app.chat_history import delete_session as db_delete
     deleted = db_delete(session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
@@ -405,10 +401,6 @@ async def delete_session(session_id: str):
 @app.get("/api/sessions/{session_id}/export")
 async def export_session(session_id: str):
     """将会话导出为 Markdown 文件。"""
-    from app.chat_history import get_session_records
-    from fastapi.responses import Response
-    from datetime import datetime
-
     records = get_session_records(session_id)
     if not records:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
@@ -435,8 +427,6 @@ async def export_session(session_id: str):
             lines.append("")
 
         lines.append("---\n")
-
-    from urllib.parse import quote
 
     content = "\n".join(lines)
     filename = f"法律咨询_{session_id[:8]}_{datetime.now().strftime('%Y%m%d')}.md"

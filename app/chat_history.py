@@ -13,6 +13,7 @@
 import json
 import sqlite3
 import os
+import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -20,47 +21,63 @@ from typing import List, Dict, Any, Optional
 _DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "db")
 DB_PATH = os.path.join(_DB_DIR, "chat_history.db")
 
+_conn: Optional[sqlite3.Connection] = None
+_lock = threading.RLock()
+
 
 def _get_conn() -> sqlite3.Connection:
-    os.makedirs(_DB_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """获取模块级 SQLite 连接（单例，WAL 模式，线程安全）。"""
+    global _conn
+    if _conn is None:
+        with _lock:
+            if _conn is None:
+                os.makedirs(_DB_DIR, exist_ok=True)
+                _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+                _conn.row_factory = sqlite3.Row
+                _conn.execute("PRAGMA journal_mode=WAL")
+                _conn.execute("PRAGMA busy_timeout=5000")
+                _init_db(_conn)
+    return _conn
 
 
 def init_db():
+    """初始化数据库（兼容 run.py 调用，实际由 _get_conn() 自动完成）。"""
+    _get_conn()
+
+
+def _init_db(conn: sqlite3.Connection):
     """初始化数据库表（如不存在则创建），兼容旧表迁移。"""
-    with _get_conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL DEFAULT 'default',
-                question TEXT NOT NULL,
-                answer TEXT NOT NULL,
-                sources TEXT NOT NULL DEFAULT '[]',
-                domain TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL
-            )
-        """)
-        # 兼容旧表：如果缺少列则添加
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(chat_history)").fetchall()]
-        if "session_id" not in cols:
-            conn.execute("ALTER TABLE chat_history ADD COLUMN session_id TEXT NOT NULL DEFAULT 'default'")
-        if "domain" not in cols:
-            conn.execute("ALTER TABLE chat_history ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
-        # 会话元数据表（置顶等）
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS session_meta (
-                session_id TEXT PRIMARY KEY,
-                pinned INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-        conn.commit()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL DEFAULT 'default',
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            sources TEXT NOT NULL DEFAULT '[]',
+            domain TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """)
+    # 兼容旧表：如果缺少列则添加
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(chat_history)").fetchall()]
+    if "session_id" not in cols:
+        conn.execute("ALTER TABLE chat_history ADD COLUMN session_id TEXT NOT NULL DEFAULT 'default'")
+    if "domain" not in cols:
+        conn.execute("ALTER TABLE chat_history ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
+    # 会话元数据表（置顶等）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS session_meta (
+            session_id TEXT PRIMARY KEY,
+            pinned INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
 
 
 def save_record(session_id: str, question: str, answer: str, sources: List[Dict[str, str]], domain: str = "") -> int:
     """保存一条问答记录，关联到指定会话。"""
-    with _get_conn() as conn:
+    with _lock:
+        conn = _get_conn()
         cursor = conn.execute(
             "INSERT INTO chat_history (session_id, question, answer, sources, domain, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (session_id, question, answer, json.dumps(sources, ensure_ascii=False), domain, datetime.now().isoformat()),
@@ -71,7 +88,8 @@ def save_record(session_id: str, question: str, answer: str, sources: List[Dict[
 
 def get_sessions() -> List[Dict[str, Any]]:
     """获取会话列表：每个会话显示第一条问题作为标题，置顶会话排最前，按最新活动倒序。"""
-    with _get_conn() as conn:
+    with _lock:
+        conn = _get_conn()
         rows = conn.execute("""
             SELECT c1.session_id,
                    (SELECT question FROM chat_history c2 WHERE c2.session_id = c1.session_id ORDER BY id ASC LIMIT 1) as title,
@@ -94,7 +112,8 @@ def get_sessions() -> List[Dict[str, Any]]:
 
 def get_session_records(session_id: str) -> List[Dict[str, Any]]:
     """获取指定会话的全部对话记录，按时间正序。"""
-    with _get_conn() as conn:
+    with _lock:
+        conn = _get_conn()
         rows = conn.execute(
             "SELECT id, session_id, question, answer, sources, created_at FROM chat_history WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
@@ -104,7 +123,8 @@ def get_session_records(session_id: str) -> List[Dict[str, Any]]:
 
 def get_history(limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
     """分页查询历史记录，按时间倒序。"""
-    with _get_conn() as conn:
+    with _lock:
+        conn = _get_conn()
         rows = conn.execute(
             "SELECT id, session_id, question, answer, sources, created_at FROM chat_history ORDER BY id DESC LIMIT ? OFFSET ?",
             (limit, offset),
@@ -114,7 +134,8 @@ def get_history(limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
 
 def get_record_by_id(record_id: int) -> Optional[Dict[str, Any]]:
     """按 ID 查询单条记录。"""
-    with _get_conn() as conn:
+    with _lock:
+        conn = _get_conn()
         row = conn.execute(
             "SELECT id, session_id, question, answer, sources, created_at FROM chat_history WHERE id = ?",
             (record_id,),
@@ -124,7 +145,8 @@ def get_record_by_id(record_id: int) -> Optional[Dict[str, Any]]:
 
 def delete_session(session_id: str) -> bool:
     """删除指定会话的全部记录，返回是否删除成功。"""
-    with _get_conn() as conn:
+    with _lock:
+        conn = _get_conn()
         cursor = conn.execute(
             "DELETE FROM chat_history WHERE session_id = ?",
             (session_id,),
@@ -135,7 +157,8 @@ def delete_session(session_id: str) -> bool:
 
 def get_total_count() -> int:
     """返回历史记录总数。"""
-    with _get_conn() as conn:
+    with _lock:
+        conn = _get_conn()
         row = conn.execute("SELECT COUNT(*) as cnt FROM chat_history").fetchone()
         return row["cnt"]
 
@@ -154,7 +177,8 @@ def _row_to_dict(row) -> Dict[str, Any]:
 
 def toggle_pin(session_id: str) -> bool:
     """切换会话置顶状态，返回新的 pinned 状态。"""
-    with _get_conn() as conn:
+    with _lock:
+        conn = _get_conn()
         conn.execute(
             "INSERT OR IGNORE INTO session_meta (session_id, pinned) VALUES (?, 0)",
             (session_id,),
