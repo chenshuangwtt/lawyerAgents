@@ -251,6 +251,17 @@ class Settings:
         default_factory=lambda: int(os.getenv("SEMANTIC_CACHE_MAX_ITEMS", "1000"))
     )
 
+    # --- 案情分析 ---
+    enable_case_analysis: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_CASE_ANALYSIS", "true").lower() == "true"
+    )
+    analysis_max_claims: int = field(
+        default_factory=lambda: int(os.getenv("ANALYSIS_MAX_CLAIMS", "5"))
+    )
+    analysis_retrieval_top_k: int = field(
+        default_factory=lambda: int(os.getenv("ANALYSIS_RETRIEVAL_TOP_K", "4"))
+    )
+
     # --- 热更新白名单 ---
     HOT_RELOADABLE_FIELDS = {
         "bm25_top_k", "vector_top_k", "rerank_final_k",
@@ -260,6 +271,7 @@ class Settings:
         "enable_case_retrieval", "case_top_k",
         "multi_domain_max_domains",
         "enable_semantic_cache", "semantic_cache_threshold",
+        "enable_case_analysis", "analysis_max_claims", "analysis_retrieval_top_k",
     }
 
     def update(self, updates: dict) -> list[str]:
