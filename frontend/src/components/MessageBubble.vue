@@ -16,7 +16,24 @@ const props = defineProps({
   streaming: { type: Boolean, default: false },
   substeps: { type: Array, default: () => [] },
   intent: { type: String, default: '' },
+  case_state: { type: Object, default: null },
 })
+
+const emit = defineEmits(['generateDocument'])
+
+const showDocMenu = ref(false)
+
+const docTypes = [
+  { type: 'labor_arbitration', label: '劳动仲裁申请书' },
+  { type: 'civil_complaint', label: '民事起诉状' },
+  { type: 'lawyer_letter', label: '律师函' },
+  { type: 'contract_review', label: '合同审查意见' },
+]
+
+function requestDocument(docType) {
+  showDocMenu.value = false
+  emit('generateDocument', { document_type: docType, case_state: props.case_state })
+}
 
 // 案例卡片展开状态
 const expandedCases = ref({})
@@ -125,6 +142,12 @@ function stepLabel(step) {
         >
           案情分析
         </span>
+        <span
+          v-if="intent === 'document'"
+          class="text-xs px-2.5 py-1 rounded-lg font-semibold ring-1 ring-inset shadow-sm bg-emerald-50 text-emerald-600 ring-emerald-200"
+        >
+          法律文书
+        </span>
         <span v-if="streaming" class="text-xs text-blue-400 flex items-center gap-1">
           <span class="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse"></span>
           生成中
@@ -200,6 +223,35 @@ function stepLabel(step) {
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/>
         </svg>
         <span class="text-xs text-gray-400 leading-relaxed">{{ risk_warning }}</span>
+      </div>
+
+      <!-- 生成文书按钮 -->
+      <div v-if="intent === 'analysis' && !streaming" class="mt-3 relative inline-block">
+        <button
+          class="text-xs px-3 py-1.5 rounded-lg font-medium bg-blue-50 text-blue-600 ring-1 ring-blue-200 hover:bg-blue-100 transition-colors flex items-center gap-1.5"
+          @click="showDocMenu = !showDocMenu"
+        >
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+          生成文书
+          <svg class="w-3 h-3 transition-transform" :class="{ 'rotate-180': showDocMenu }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        <div
+          v-if="showDocMenu"
+          class="absolute left-0 mt-1 bg-white rounded-xl shadow-lg ring-1 ring-gray-200 py-1 z-10 min-w-40"
+        >
+          <button
+            v-for="dt in docTypes"
+            :key="dt.type"
+            class="w-full text-left px-4 py-2 text-xs text-gray-700 hover:bg-blue-50 hover:text-blue-600 transition-colors"
+            @click="requestDocument(dt.type)"
+          >
+            {{ dt.label }}
+          </button>
+        </div>
       </div>
 
       <!-- 来自缓存 -->

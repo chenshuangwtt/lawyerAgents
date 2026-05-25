@@ -47,6 +47,14 @@ _STATUTE_KEYWORDS = [
     "时效计算", "算一下时效",
 ]
 
+# 法律文书意图关键词
+_DOCUMENT_KEYWORDS = [
+    "仲裁申请书", "起诉状", "律师函", "合同审查",
+    "写文书", "写申请书", "写起诉状", "写律师函",
+    "起草", "代书", "法律文书", "生成文书",
+    "申请书模板", "起诉状模板",
+]
+
 
 def classify_by_keywords(question: str) -> tuple:
     """
@@ -88,11 +96,14 @@ def classify_by_keywords(question: str) -> tuple:
 
 def classify_intent(question: str) -> str:
     """
-    判断用户意图：qa / analysis / statute。
+    判断用户意图：qa / analysis / statute / document。
     关键词快速匹配，不调 LLM。
     """
     q = question.strip()
-    # 时效关键词足够明确，不需要长度过滤
+    # 文书和时效关键词足够明确，不需要长度过滤
+    for kw in _DOCUMENT_KEYWORDS:
+        if kw in q:
+            return "document"
     for kw in _STATUTE_KEYWORDS:
         if kw in q:
             return "statute"

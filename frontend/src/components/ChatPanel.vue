@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { sendMessageStream, getLaws } from '../api.js'
+import { sendMessageStream, getLaws, sendDocumentStream } from '../api.js'
 import MessageBubble from './MessageBubble.vue'
 
 const props = defineProps({
@@ -132,6 +132,7 @@ async function onSend() {
     case_results: [],
     cached: false,
     intent: '',
+    case_state: null,
     time: new Date().toLocaleTimeString(),
     streaming: true,
     substeps: [],
@@ -174,6 +175,7 @@ async function onSend() {
           msg.sources = data.sources || []
           msg.risk_warning = data.risk_warning || ''
           msg.case_results = data.case_results || []
+          if (data.case_state) msg.case_state = data.case_state
           if (data.cached) msg.cached = true
           msg.streaming = false
         }
@@ -199,6 +201,84 @@ async function onSend() {
 }
 
 function onSuggestion(q) { input.value = q; onSend() }
+
+function onGenerateDocument({ document_type, case_state }) {
+  const docLabels = {
+    labor_arbitration: '劳动仲裁申请书',
+    civil_complaint: '民事起诉状',
+    lawyer_letter: '律师函',
+    contract_review: '合同审查意见',
+  }
+  const label = docLabels[document_type] || document_type
+
+  // 添加用户消息
+  props.messages.push({ role: 'user', content: `生成${label}`, time: new Date().toLocaleTimeString() })
+
+  // 预占 assistant 消息位
+  const msgIndex = props.messages.length
+  props.messages.push({
+    role: 'assistant',
+    content: '',
+    sources: [],
+    domain: '',
+    domains: [],
+    risk_warning: '',
+    case_results: [],
+    cached: false,
+    intent: 'document',
+    case_state: null,
+    time: new Date().toLocaleTimeString(),
+    streaming: true,
+    substeps: [],
+  })
+
+  loading.value = true
+
+  sendDocumentStream(document_type, {
+    case_state: case_state,
+    sessionId: props.sessionId,
+  }, {
+    onMeta(data) {
+      const msg = props.messages[msgIndex]
+      if (msg) {
+        msg.domain = data.domain || '综合'
+        if (data.intent) msg.intent = data.intent
+      }
+    },
+    onSubstep(data) {
+      const msg = props.messages[msgIndex]
+      if (msg) {
+        msg.substeps.push({ step: data.step || '', elapsed_ms: data.elapsed_ms || 0, detail: data.detail || '' })
+      }
+    },
+    onToken(data) {
+      const msg = props.messages[msgIndex]
+      if (msg) {
+        msg.content += data.content
+        if (atBottom.value) requestAnimationFrame(scrollBottom)
+      }
+    },
+    onDone(data) {
+      const msg = props.messages[msgIndex]
+      if (msg) {
+        msg.sources = data.sources || []
+        msg.risk_warning = data.risk_warning || ''
+        msg.streaming = false
+      }
+      loading.value = false
+      emit('messageSent')
+    },
+    onError(message) {
+      const msg = props.messages[msgIndex]
+      if (msg) {
+        msg.content = message || '文书生成失败，请稍后重试'
+        msg.streaming = false
+      }
+      loading.value = false
+      emit('messageSent')
+    },
+  })
+}
 
 function onKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend() }
@@ -318,6 +398,8 @@ watch(() => input.value, () => nextTick(adjustHeight))
           :streaming="msg.streaming"
           :substeps="msg.substeps"
           :intent="msg.intent"
+          :case_state="msg.case_state"
+          @generateDocument="onGenerateDocument"
         />
       </div>
     </div>

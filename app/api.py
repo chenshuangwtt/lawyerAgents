@@ -316,6 +316,14 @@ async def chat_stream(request: ChatRequest):
                 request.question, request.session_id,
                 components=rag_components,
             )
+        elif intent == "document":
+            # --- 法律文书路径 ---
+            from app.rag_chain import ask_document_stream
+            stream = ask_document_stream(
+                llm,
+                request.question, request.session_id,
+                components=rag_components,
+            )
         else:
             # --- 普通 QA 路径 ---
             stream = ask_stream(
@@ -385,6 +393,71 @@ async def chat_stream(request: ChatRequest):
                     done_data["case_results"] = event["case_results"]
                 yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
 
+            elif event_type == "error":
+                yield f"event: error\ndata: {json.dumps({'message': event['message']}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+class DocumentRequest(BaseModel):
+    """法律文书生成请求体。"""
+    document_type: str = Field(
+        ...,
+        description="文书类型：labor_arbitration / civil_complaint / lawyer_letter / contract_review",
+    )
+    case_state: Optional[dict] = Field(
+        default=None,
+        description="案情状态（从分析报告跳转时传入）",
+    )
+    session_id: str = Field(default="default", description="会话 ID")
+    extra_info: str = Field(
+        default="",
+        description="补充信息（如合同原文、具体要求等）",
+    )
+
+
+@app.post("/api/document")
+async def generate_document(request: DocumentRequest):
+    """法律文书生成接口：SSE 流式返回文书内容。"""
+    if llm is None:
+        raise HTTPException(status_code=503, detail="LLM 尚未初始化")
+
+    async def event_generator():
+        from app.rag_chain import generate_document_from_api
+        stream = generate_document_from_api(
+            llm,
+            document_type=request.document_type,
+            case_state=request.case_state,
+            extra_info=request.extra_info,
+            session_id=request.session_id,
+            components=rag_components,
+        )
+
+        while True:
+            try:
+                event = await asyncio.wait_for(stream.__anext__(), timeout=15)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                yield ":keepalive\n\n"
+                continue
+
+            event_type = event["type"]
+
+            if event_type == "meta":
+                meta_data = {"domain": event.get("domain", "综合"), "intent": "document"}
+                yield f"event: meta\ndata: {json.dumps(meta_data, ensure_ascii=False)}\n\n"
+            elif event_type == "substep":
+                yield f"event: substep\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+            elif event_type == "token":
+                yield f"event: token\ndata: {json.dumps({'content': event['content']}, ensure_ascii=False)}\n\n"
+            elif event_type == "done":
+                done_data = {
+                    "sources": event.get("sources", []),
+                    "risk_warning": event.get("risk_warning", ""),
+                    "domain": event.get("domain", "综合"),
+                }
+                yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
             elif event_type == "error":
                 yield f"event: error\ndata: {json.dumps({'message': event['message']}, ensure_ascii=False)}\n\n"
 

@@ -1445,3 +1445,137 @@ def _save_statute_history(session_id: str, question: str, answer: str):
         HumanMessage(content=question),
         AIMessage(content=answer),
     ])
+
+
+async def ask_document_stream(
+    llm: BaseChatModel,
+    question: str,
+    session_id: str = "default",
+    components: Optional[Dict] = None,
+    document_type: Optional[str] = None,
+    case_state: Optional[Dict] = None,
+):
+    """
+    法律文书生成。从用户描述或 case_state 中提取字段，生成文书。
+
+    Args:
+        document_type: 指定文书类型（从 API 调用时传入）
+        case_state: 案情状态（从分析报告跳转时传入）
+
+    Yields:
+        同 ask_analysis_stream 的事件格式
+    """
+    from app.document_generator import (
+        DOCUMENT_TEMPLATES, render_document, get_available_types,
+        extract_fields_from_case_state,
+    )
+
+    if components is None:
+        components = {}
+
+    try:
+        yield {"type": "meta", "intent": "document", "domain": "综合"}
+
+        # 确定文书类型
+        if not document_type:
+            # 从用户描述中推断
+            for dtype, tmpl in DOCUMENT_TEMPLATES.items():
+                if tmpl.name in question or dtype in question:
+                    document_type = dtype
+                    break
+
+        if not document_type or document_type not in DOCUMENT_TEMPLATES:
+            # 无法确定类型，列出可选项
+            types = get_available_types()
+            type_list = "\n".join(f"- **{t['name']}**（{t['type']}）" for t in types)
+            answer = f"请指定要生成的文书类型：\n\n{type_list}\n\n例如：「帮我写一份劳动仲裁申请书」"
+            yield {"type": "token", "content": answer}
+            _save_document_history(session_id, question, answer)
+            yield {"type": "done", "sources": [], "risk_warning": RISK_WARNING, "domain": "综合"}
+            return
+
+        template = DOCUMENT_TEMPLATES[document_type]
+        yield {"type": "substep", "step": "decompose", "elapsed_ms": 0,
+               "detail": f"生成{template.name}"}
+
+        # 构建上下文
+        context_parts = []
+        if case_state:
+            case_context = extract_fields_from_case_state(case_state)
+            if case_context:
+                context_parts.append(case_context)
+
+        context_parts.append(f"用户描述：{question}")
+        context = "\n\n".join(context_parts)
+
+        # LLM 提取字段
+        _t = time.perf_counter()
+        prompt = template.extract_prompt.format(context=context[:4000])
+        response = await llm.ainvoke(prompt)
+        extract_ms = round((time.perf_counter() - _t) * 1000)
+        yield {"type": "substep", "step": "decompose", "elapsed_ms": extract_ms,
+               "detail": "字段提取完成"}
+
+        raw = response.content if hasattr(response, "content") else str(response)
+        # 提取 JSON
+        json_match = re.search(r"\{[\s\S]*\}", raw)
+        if not json_match:
+            yield {"type": "error", "message": f"{template.name}字段提取失败，请提供更详细的案情描述。"}
+            return
+
+        try:
+            fields = json.loads(json_match.group())
+        except json.JSONDecodeError:
+            yield {"type": "error", "message": "字段解析失败。"}
+            return
+
+        # 渲染文书
+        _t = time.perf_counter()
+        document = render_document(document_type, fields)
+        gen_ms = round((time.perf_counter() - _t) * 1000)
+        yield {"type": "substep", "step": "generate", "elapsed_ms": gen_ms,
+               "detail": f"{template.name}生成完成"}
+
+        # 流式输出
+        for line in document.split("\n"):
+            if line.strip():
+                yield {"type": "token", "content": line + "\n"}
+
+        _save_document_history(session_id, question, document)
+        yield {"type": "done", "sources": [], "risk_warning": RISK_WARNING, "domain": "综合"}
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        yield {"type": "error", "message": f"文书生成出错: {e}"}
+
+
+async def generate_document_from_api(
+    llm: BaseChatModel,
+    document_type: str,
+    case_state: Optional[Dict] = None,
+    extra_info: str = "",
+    session_id: str = "default",
+    components: Optional[Dict] = None,
+):
+    """
+    API 专用的文书生成函数。接收结构化输入，返回文书流。
+
+    与 ask_document_stream 的区别：不依赖 intent 检测，直接传入 doc_type。
+    """
+    question = extra_info or f"请生成{document_type}类型的法律文书"
+    async for event in ask_document_stream(
+        llm, question, session_id, components,
+        document_type=document_type, case_state=case_state,
+    ):
+        yield event
+
+
+def _save_document_history(session_id: str, question: str, answer: str):
+    """保存文书生成历史。"""
+    from langchain_core.messages import HumanMessage, AIMessage
+    history_obj = _get_session_history(session_id)
+    history_obj.add_messages([
+        HumanMessage(content=question),
+        AIMessage(content=answer),
+    ])

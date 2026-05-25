@@ -118,3 +118,56 @@ export function exportSession(sessionId) {
 export function getLaws() {
   return http.get('/laws').then(r => r.data)
 }
+
+/** 生成法律文书（流式 SSE） */
+export async function sendDocumentStream(documentType, { case_state, sessionId, extra_info }, { onMeta, onToken, onDone, onError, onSubstep }) {
+  try {
+    const res = await fetch('/api/document', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        document_type: documentType,
+        case_state: case_state || null,
+        session_id: sessionId || 'default',
+        extra_info: extra_info || '',
+      }),
+    })
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }))
+      onError?.(err.detail || '请求失败')
+      return
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let hasContent = false
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const lines = buffer.split('\n')
+      buffer = lines.pop()
+
+      let eventType = null
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7).trim()
+        } else if (line.startsWith('data: ') && eventType) {
+          const data = JSON.parse(line.slice(6))
+          if (eventType === 'meta') onMeta?.(data)
+          else if (eventType === 'token') { onToken?.(data); hasContent = true }
+          else if (eventType === 'done') onDone?.(data)
+          else if (eventType === 'substep') onSubstep?.(data)
+          else if (eventType === 'error') onError?.(data.message)
+          eventType = null
+        }
+      }
+    }
+  } catch {
+    onError?.('网络连接失败')
+  }
+}
