@@ -35,6 +35,12 @@ from app.article_index import get_adjacent_articles
 from app.memory_compression import compress_messages
 from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
 
+# 款级引用模式：匹配"第X条第Y款"格式
+PARA_PATTERN = re.compile(
+    r'第([一二三四五六七八九十百千万0-9]+)条(?:之([一二三四五六七八九十]+))?'
+    r'(?:第([一二三四五六七八九十百千万0-9]+)款)?'
+)
+
 logger = logging.getLogger(__name__)
 
 # 概览类问题关键词：匹配任一则跳过案例检索
@@ -162,6 +168,7 @@ QA_PROMPT = ChatPromptTemplate.from_messages([
 
 ### 🔍 法律依据与分析
 - 引用法条原文，标注出处：**《法律名称》第X条**："条文原文"
+- 如检索到的条文包含款编号（（一）（二）等），请精确引用为 **《法律名称》第X条第Y款**，如《民法典》第1042条第2款
 - 结合用户的具体情况解释条文适用逻辑
 - 如涉及多部法律，分别论述
 - 用 Markdown 列表保持结构清晰
@@ -206,7 +213,7 @@ QA_MULTI_DOMAIN_PROMPT = ChatPromptTemplate.from_messages([
 （结论先行。说明问题涉及哪些法律领域，用 1-2 句话给出**加粗的定性判断**。）
 
 ### 🔍 法律依据与分析
-（按领域分段论述，每段标注领域名称，引用法条原文并结合案情解释。）
+（按领域分段论述，每段标注领域名称，引用法条原文并结合案情解释。如检索到的条文包含款编号（（一）（二）等），请精确引用为 **《法律名称》第X条第Y款**。）
 
 ### ⚠️ 实务建议与风险提示
 - 给出具体可操作的建议（维权途径、时限、证据保全等）
@@ -316,11 +323,11 @@ def _contextualize_query(
 # --- 来源格式化 ---
 
 def _extract_article_numbers(text: str) -> List[str]:
-    """从文本中提取所有"第X条"形式的条号。"""
-    matches = re.findall(r'第[（(]?[一二三四五六七八九十百千零\d]+[）)]?条', text)
+    """从文本中提取所有"第X条"或"第X条第Y款"形式的条号。"""
+    para_matches = re.findall(r'第[（(]?[一二三四五六七八九十百千零\d]+[）)]?条(?:第[一二三四五六七八九十百千零\d]+款)?', text)
     seen = set()
     result = []
-    for m in matches:
+    for m in para_matches:
         if m not in seen:
             seen.add(m)
             result.append(m)
@@ -473,17 +480,21 @@ def _verify_citations(
         law_articles = article_index[law_name]
         verified_articles = []
         for art in article_list:
-            # 去掉尾部"等X条"标记来提取纯条号
             clean_art = re.sub(r"\s*等\d+条$", "", art)
-            art_match = ARTICLE_PATTERN.search(clean_art)
-            if art_match:
-                art_num = _chinese_num_to_int(art_match.group(1))
+            # 尝试款级匹配
+            para_match = PARA_PATTERN.search(clean_art)
+            if para_match:
+                art_num = _chinese_num_to_int(para_match.group(1))
                 if art_num > 0 and art_num in law_articles:
                     verified_articles.append(clean_art)
-                # 条号不在索引中 → 可能是 LLM 编造，移除
             else:
-                # 无法解析的条号保留
-                verified_articles.append(art)
+                art_match = ARTICLE_PATTERN.search(clean_art)
+                if art_match:
+                    art_num = _chinese_num_to_int(art_match.group(1))
+                    if art_num > 0 and art_num in law_articles:
+                        verified_articles.append(clean_art)
+                else:
+                    verified_articles.append(art)
 
         if verified_articles:
             new_label = f"{law_name} {'、'.join(verified_articles)}"
