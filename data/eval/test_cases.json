@@ -1,0 +1,219 @@
+[
+  {
+    "id": 1,
+    "question": "试用期被无故辞退，公司需要赔偿吗？能赔多少？",
+    "expected_domain": "劳动",
+    "expected_laws": ["中华人民共和国劳动合同法"],
+    "tags": ["single-domain"]
+  },
+  {
+    "id": 2,
+    "question": "离婚后孩子抚养权怎么判？法院主要考虑哪些因素？",
+    "expected_domain": "婚姻",
+    "expected_laws": ["中华人民共和国民法典"],
+    "tags": ["single-domain"]
+  },
+  {
+    "id": 3,
+    "question": "盗窃罪的立案标准是多少？偷多少钱才构成犯罪？",
+    "expected_domain": "刑事",
+    "expected_laws": ["中华人民共和国刑法"],
+    "tags": ["single-domain"]
+  },
+  {
+    "id": 4,
+    "question": "去法院起诉需要准备哪些材料？诉讼费怎么算？",
+    "expected_domain": "民事诉讼",
+    "expected_laws": ["中华人民共和国民事诉讼法"],
+    "tags": ["single-domain"]
+  },
+  {
+    "id": 5,
+    "question": "APP 要求读取通讯录才给用，这合法吗？能拒绝吗？",
+    "expected_domain": "网络与数据",
+    "expected_laws": ["中华人民共和国个人信息保护法"],
+    "tags": ["single-domain"]
+  },
+  {
+    "id": 6,
+    "question": "个人所得税的专项附加扣除有哪些？怎么申报？",
+    "expected_domain": "税务",
+    "expected_laws": ["中华人民共和国增值税法"],
+    "tags": ["single-domain"]
+  },
+  {
+    "id": 7,
+    "question": "在小区聚众赌博被抓获，会被拘留多少天？罚款多少？",
+    "expected_domain": "治安",
+    "expected_laws": ["中华人民共和国治安管理处罚法"],
+    "tags": ["single-domain"]
+  },
+  {
+    "id": 8,
+    "question": "公司商业秘密被竞争对手窃取，能要求多少赔偿？",
+    "expected_domain": "商事",
+    "expected_laws": ["中华人民共和国反不正当竞争法"],
+    "tags": ["single-domain"]
+  },
+  {
+    "id": 9,
+    "question": "公司高管挪用了员工的工资款，员工该怎么维权？能追究刑事责任吗？",
+    "expected_domain": "劳动",
+    "expected_laws": ["中华人民共和国劳动合同法", "中华人民共和国刑法"],
+    "tags": ["dual-domain"]
+  },
+  {
+    "id": 10,
+    "question": "离婚诉讼中，配偶偷拍的聊天记录和开房记录能作为出轨证据吗？",
+    "expected_domain": "婚姻",
+    "expected_laws": ["中华人民共和国民法典", "中华人民共和国个人信息保护法"],
+    "tags": ["dual-domain"]
+  },
+  {
+    "id": 11,
+    "question": "被人殴打成轻微伤，对方会被治安拘留还是判刑？",
+    "expected_domain": "治安",
+    "expected_laws": ["中华人民共和国治安管理处罚法", "中华人民共和国刑法"],
+    "tags": ["dual-domain"]
+  },
+  {
+    "id": 12,
+    "question": "15 岁少年在校打架把同学打成重伤，要负刑事责任吗？家长要赔偿吗？",
+    "expected_domain": "未成年人",
+    "expected_laws": ["中华人民共和国未成年人保护法", "中华人民共和国刑法"],
+    "tags": ["dual-domain"]
+  },
+  {
+    "id": 13,
+    "question": "在餐厅就餐后食物中毒住院，该怎么起诉索赔？需要哪些证据？",
+    "expected_domain": "食药安全",
+    "expected_laws": ["中华人民共和国食品安全法", "中华人民共和国民事诉讼法"],
+    "tags": ["dual-domain"]
+  },
+  {
+    "id": 14,
+    "question": "离职员工把客户名单卖给竞争对手，公司怎么起诉要求赔偿？",
+    "expected_domain": "商事",
+    "expected_laws": ["中华人民共和国反不正当竞争法", "中华人民共和国民事诉讼法"],
+    "tags": ["dual-domain"]
+  },
+  {
+    "id": 15,
+    "question": "丈夫长期家暴妻子，女方报警后警方会怎么处理？能申请人身保护令吗？",
+    "expected_domain": "婚姻",
+    "expected_laws": ["中华人民共和国民法典", "中华人民共和国治安管理处罚法"],
+    "tags": ["dual-domain"]
+  },
+  {
+    "id": 16,
+    "question": "政府官员收受企业贿赂为对方谋取项目审批便利，会被怎么处分？构成犯罪吗？",
+    "expected_domain": "监察",
+    "expected_laws": ["中华人民共和国监察法", "中华人民共和国刑法"],
+    "tags": ["dual-domain"]
+  },
+  {
+    "id": 17,
+    "question": "公司领导性骚扰女员工后，以旷工为由将其违法辞退，员工该如何维权？",
+    "expected_domain": "劳动",
+    "expected_laws": ["中华人民共和国劳动合同法", "中华人民共和国治安管理处罚法", "中华人民共和国刑法"],
+    "tags": ["three-domain"]
+  },
+  {
+    "id": 18,
+    "question": "14 岁少年校园霸凌致同学重伤，对方家长要求巨额赔偿，该怎么处理？",
+    "expected_domain": "未成年人",
+    "expected_laws": ["中华人民共和国未成年人保护法", "中华人民共和国刑法", "中华人民共和国民事诉讼法"],
+    "tags": ["three-domain"]
+  },
+  {
+    "id": 19,
+    "question": "商家销售掺假牛肉被查出，消费者集体食物中毒，消费者该怎么维权？",
+    "expected_domain": "食药安全",
+    "expected_laws": ["中华人民共和国食品安全法", "中华人民共和国刑法", "中华人民共和国民事诉讼法"],
+    "tags": ["three-domain"]
+  },
+  {
+    "id": 20,
+    "question": "老板拖欠工资还威胁恐吓员工，员工该怎么维权？能否同时报警和申请仲裁？",
+    "expected_domain": "劳动",
+    "expected_laws": ["中华人民共和国劳动合同法", "中华人民共和国刑法", "中华人民共和国民事诉讼法", "中华人民共和国仲裁法"],
+    "tags": ["three-domain"]
+  },
+  {
+    "id": 21,
+    "question": "行政执法人员收受贿赂后违规发放许可证，相关方该怎么投诉和举报？",
+    "expected_domain": "监察",
+    "expected_laws": ["中华人民共和国监察法", "中华人民共和国刑法", "中华人民共和国行政复议法"],
+    "tags": ["three-domain"]
+  },
+  {
+    "id": 22,
+    "question": "16 岁少年冒用他人身份证入职后遭遇工伤，公司发现后拒绝赔偿并报警，家长该怎么办？",
+    "expected_domain": "劳动",
+    "expected_laws": ["中华人民共和国劳动合同法", "中华人民共和国未成年人保护法", "中华人民共和国民事诉讼法"],
+    "tags": ["three-domain"]
+  },
+  {
+    "id": 23,
+    "question": "某公司生产销售假药，通过不正当竞争手段抢占正规药企市场，消费者服用后住院，该怎么追究？",
+    "expected_domain": "食药安全",
+    "expected_laws": ["中华人民共和国食品安全法", "中华人民共和国刑法", "中华人民共和国反不正当竞争法", "中华人民共和国民事诉讼法"],
+    "tags": ["four-domain"]
+  },
+  {
+    "id": 24,
+    "question": "政府税务官员收受贿赂，帮助企业偷税漏税并违规办理退税，企业后续该怎么应对行政调查？",
+    "expected_domain": "监察",
+    "expected_laws": ["中华人民共和国监察法", "中华人民共和国刑法", "中华人民共和国行政复议法", "中华人民共和国增值税法"],
+    "tags": ["four-domain"]
+  },
+  {
+    "id": 25,
+    "question": "中学生被同学网络暴力，在网上散布其隐私照片并辱骂威胁，导致受害人精神崩溃，该怎么维权？",
+    "expected_domain": "未成年人",
+    "expected_laws": ["中华人民共和国未成年人保护法", "中华人民共和国刑法", "中华人民共和国治安管理处罚法", "中华人民共和国个人信息保护法"],
+    "tags": ["four-domain"]
+  },
+  {
+    "id": 26,
+    "question": "入室盗窃价值三万元财物，会被判几年？",
+    "expected_domain": "刑事",
+    "expected_laws": ["中华人民共和国刑法"],
+    "tags": ["case-retrieval", "single-domain"]
+  },
+  {
+    "id": 27,
+    "question": "因口角纠纷将人打成轻伤二级，对方不谅解，会怎么判？",
+    "expected_domain": "刑事",
+    "expected_laws": ["中华人民共和国刑法"],
+    "tags": ["case-retrieval", "single-domain"]
+  },
+  {
+    "id": 28,
+    "question": "在网上发布虚假商品信息骗取多人货款共计五万元，构成什么罪？判多久？",
+    "expected_domain": "刑事",
+    "expected_laws": ["中华人民共和国刑法"],
+    "tags": ["case-retrieval", "single-domain"]
+  },
+  {
+    "id": 29,
+    "question": "醉酒驾驶血液酒精含量 180mg/100ml，没有造成事故，会怎么处理？",
+    "expected_domain": "刑事",
+    "expected_laws": ["中华人民共和国刑法"],
+    "tags": ["case-retrieval", "single-domain"]
+  },
+  {
+    "id": 30,
+    "question": "明知是盗窃来的手机还以低价收购，会构成犯罪吗？",
+    "expected_domain": "刑事",
+    "expected_laws": ["中华人民共和国刑法"],
+    "tags": ["case-retrieval", "single-domain"]
+  },
+  {
+    "id": 31,
+    "question": "从国外代购奢侈品入境未申报，金额超过十万元，会被追究刑事责任吗？",
+    "expected_domain": "刑事",
+    "expected_laws": ["中华人民共和国刑法"],
+    "tags": ["case-retrieval", "single-domain"]
+  }
+]
