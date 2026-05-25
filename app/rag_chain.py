@@ -14,6 +14,7 @@ RAG（检索增强生成）链模块，支持完整的 7 步流水线。
 import re
 import json
 import logging
+import time
 from typing import List, Dict, Any, Optional
 
 from langchain_core.language_models import BaseChatModel
@@ -557,7 +558,11 @@ def _retrieve_context(
     adjacent_range = components.get("adjacent_range", 1)
     enable_classification = components.get("enable_classification", True)
 
+    timings = {}
+    method = "unknown"
+
     # ① 问题分类（如有 override 则跳过）
+    _t = time.perf_counter()
     if domain_override is not None:
         domain = domain_override
         law_names = law_names_override or []
@@ -567,6 +572,7 @@ def _retrieve_context(
             result = classify_question(llm, question)
             domain = result["domain"]
             law_names = result["law_names"]
+            method = result.get("method", "unknown")
         except Exception as e:
             logger.warning("[分类] 失败: %s，使用默认领域", e)
             domain = "综合"
@@ -575,13 +581,17 @@ def _retrieve_context(
     else:
         domain = "综合"
         law_names = []
+    timings["classify"] = round((time.perf_counter() - _t) * 1000)
 
     # ② 多轮追问重写（优先使用轻量 LLM，低延迟）
+    _t = time.perf_counter()
     history_obj = _get_session_history(session_id)
     contextualize_llm = components.get("lightweight_llm") or llm
     contextualized_q = _contextualize_query(contextualize_llm, history_obj.messages, question)
+    timings["contextualize"] = round((time.perf_counter() - _t) * 1000)
 
     # ③ 混合检索（BM25 + 向量 + RRF）
+    _t = time.perf_counter()
     if law_names and hasattr(retriever, 'vectorstore'):
         filtered_retriever = retriever.vectorstore.as_retriever(
             search_kwargs={"k": vector_top_k, "filter": {"source": {"$in": law_names}}}
@@ -615,8 +625,10 @@ def _retrieve_context(
     logger.info("[混合检索] BM25=%s + 向量=%s → RRF融合=%s", len(bm25_results), len(vector_docs), len(merged_docs))
     if len(vector_docs) == 0:
         logger.warning("[混合检索] 向量检索返回 0 条，可能是 Embedding API 响应异常或向量库未完整构建")
+    timings["retrieve"] = round((time.perf_counter() - _t) * 1000)
 
     # ④ Rerank 精排
+    _t = time.perf_counter()
     if reranker and merged_docs:
         scored_reranked = reranker.rerank(contextualized_q, merged_docs, top_k=rerank_final_k)
         reranked_docs = [doc for doc, _ in scored_reranked]
@@ -625,8 +637,10 @@ def _retrieve_context(
     else:
         reranked_docs = merged_docs[:rerank_final_k]
         reranked_scores = [0.0] * len(reranked_docs)
+    timings["rerank"] = round((time.perf_counter() - _t) * 1000)
 
     # ⑤ 法条上下文扩展（前后条 + 跨条引用）
+    _t = time.perf_counter()
     if components.get("enable_intelligent_expansion", False):
         from app.expander import expand_context_with_agent
         expansion_llm = components.get("expansion_llm") or components.get("lightweight_llm")
@@ -672,6 +686,7 @@ def _retrieve_context(
 
             if len(expanded_docs) > len(reranked_docs):
                 logger.info("[上下文扩展] %s → %s", len(reranked_docs), len(expanded_docs))
+    timings["expand"] = round((time.perf_counter() - _t) * 1000)
 
     # ⑤.5 定义聚合
     all_chunks = components.get("chunks", [])
@@ -692,6 +707,8 @@ def _retrieve_context(
         "reranked_docs": reranked_docs,
         "reranked_scores": reranked_scores,
         "article_index": article_index,
+        "method": method,
+        "timings": timings,
     }
 
 
@@ -785,6 +802,16 @@ async def ask_stream(
             ctx = _retrieve_context(retriever, llm, question, session_id, components)
             yield {"type": "meta", "domain": ctx["domain"]}
 
+            # emit substep events
+            yield {"type": "substep", "step": "classify", "elapsed_ms": ctx["timings"].get("classify", 0),
+                   "detail": f"领域={ctx['domain']}, 方法={ctx.get('method', 'unknown')}"}
+            yield {"type": "substep", "step": "retrieve", "elapsed_ms": ctx["timings"].get("retrieve", 0),
+                   "detail": "BM25 + 向量 → RRF"}
+            yield {"type": "substep", "step": "rerank", "elapsed_ms": ctx["timings"].get("rerank", 0),
+                   "detail": "精排完成"}
+            yield {"type": "substep", "step": "expand", "elapsed_ms": ctx["timings"].get("expand", 0),
+                   "detail": "上下文扩展"}
+
             config = {"configurable": {"session_id": session_id}}
             stream_input = {
                 "question": ctx["question"],
@@ -792,12 +819,14 @@ async def ask_stream(
                 "domain": ctx["domain"],
             }
 
+            _t_gen = time.perf_counter()
             answer_parts = []
             async for chunk in chain_with_history.astream(stream_input, config=config):
                 content = chunk.content if hasattr(chunk, "content") else str(chunk)
                 if content:
                     answer_parts.append(content)
                     yield {"type": "token", "content": content}
+            gen_ms = round((time.perf_counter() - _t_gen) * 1000)
 
             answer_text = "".join(answer_parts)
             sources = _format_sources(ctx["reranked_docs"], answer=answer_text)
@@ -820,6 +849,7 @@ async def ask_stream(
                 "sources": sources,
                 "risk_warning": RISK_WARNING,
                 "case_results": case_results,
+                "timings": {**ctx["timings"], "generate": gen_ms},
             }
     except Exception as e:
         import traceback
@@ -843,12 +873,14 @@ async def _ask_stream_graph(
     graph_input = {"question": question, "session_id": session_id}
     graph_result = None
     classify_data = None
+    _graph_timings = {}
 
     # 运行图（检索阶段）
     try:
         async for event in graph.astream(graph_input, stream_mode="updates"):
             logger.info("[graph event] %s", list(event.keys()))
             for node_name, update in event.items():
+                _t = time.perf_counter()
                 if node_name == "classify":
                     classify_data = update
                     domains = update.get("domains", [])
@@ -871,6 +903,22 @@ async def _ask_stream_graph(
                     graph_result = update
                 elif node_name == "merge_contexts":
                     graph_result = update
+                node_ms = round((time.perf_counter() - _t) * 1000)
+                _graph_timings[node_name] = node_ms
+
+                if node_name == "classify":
+                    yield {"type": "substep", "step": "classify", "elapsed_ms": node_ms,
+                           "detail": f"领域={update.get('domain', '综合')}"}
+                elif node_name == "generate_sub_questions":
+                    yield {"type": "substep", "step": "sub_questions", "elapsed_ms": node_ms,
+                           "detail": f"拆分{len(update.get('sub_questions', {}))}个子问题"}
+                elif node_name == "retrieve_one_domain":
+                    for ctx_item in update.get("retrieved_contexts", []):
+                        yield {"type": "substep", "step": "retrieve", "elapsed_ms": node_ms,
+                               "domain": ctx_item["domain"], "detail": ctx_item["domain"]}
+                elif node_name == "merge_contexts":
+                    yield {"type": "substep", "step": "merge", "elapsed_ms": node_ms,
+                           "detail": "合并多域结果"}
     except Exception as e:
         logger.warning("[graph] 异常: %s", e)
         if not graph_result:
@@ -924,6 +972,7 @@ async def _ask_stream_graph(
     stream_start = asyncio.get_event_loop().time()
     total_timeout = 180  # 整个流式生成最多 180s
     token_timeout = 60   # 首 token / 单 token 超时 60s
+    _t_gen = time.perf_counter()
     try:
         stream_iter = llm.astream(messages).__aiter__()
         while True:
@@ -954,6 +1003,7 @@ async def _ask_stream_graph(
         if not answer_parts:
             yield {"type": "error", "message": f"生成中断: {e}"}
             return
+    _graph_timings["generate"] = round((time.perf_counter() - _t_gen) * 1000)
 
     # 保存对话历史
     answer_text = "".join(answer_parts)
@@ -993,4 +1043,5 @@ async def _ask_stream_graph(
         "domain": domain,
         "multi_domain": is_multi,
         "case_results": case_results,
+        "timings": _graph_timings,
     }
