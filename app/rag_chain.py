@@ -49,6 +49,76 @@ def _is_overview_question(question: str) -> bool:
     return bool(_OVERVIEW_PATTERNS.search(question))
 
 
+# 案情状态提取 prompt
+_CASE_STATE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """分析以下法律对话，提取案情关键信息。输出 JSON 格式：
+{
+  "parties": ["当事人角色1", "当事人角色2"],
+  "dispute_type": "纠纷类型",
+  "key_facts": ["关键事实1", "关键事实2"],
+  "stage": "咨询/准备材料/诉讼中",
+  "domain_history": ["涉及领域"]
+}
+规则：
+- 只提取用户明确提到或可合理推断的信息
+- 不确定的字段用空数组或空字符串
+- 只输出 JSON，不要任何解释"""),
+    ("human", "用户问题：{question}\n\n顾问回答：{answer}"),
+])
+
+
+def _extract_case_state(
+    llm: BaseChatModel,
+    question: str,
+    answer: str,
+) -> Optional[str]:
+    """用轻量 LLM 从对话中提取案情状态 JSON 字符串。失败返回 None。"""
+    try:
+        messages = _CASE_STATE_PROMPT.format_messages(question=question, answer=answer)
+        response = invoke_with_timeout(llm, messages, timeout=10)
+        raw = response.content if hasattr(response, "content") else str(response)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+        state = json.loads(raw)
+        if isinstance(state, dict) and (state.get("parties") or state.get("dispute_type")):
+            return json.dumps(state, ensure_ascii=False)
+    except Exception as e:
+        logger.debug("[案情提取] 跳过: %s", e)
+    return None
+
+
+def _format_case_state(case_state_json: str) -> str:
+    """将案情状态 JSON 格式化为 prompt 注入文本。"""
+    try:
+        state = json.loads(case_state_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    parts = []
+    if state.get("parties"):
+        parts.append(f"当事人：{' vs '.join(state['parties'])}")
+    if state.get("dispute_type"):
+        parts.append(f"纠纷：{state['dispute_type']}")
+    if state.get("key_facts"):
+        parts.append(f"关键事实：{'、'.join(state['key_facts'])}")
+    if state.get("stage"):
+        parts.append(f"阶段：{state['stage']}")
+    return "【案情追踪】" + " | ".join(parts) if parts else ""
+
+
+def _get_case_state(session_id: str) -> Optional[str]:
+    """从 DB 获取最近一条记录的案情状态。"""
+    try:
+        from app.chat_history import get_session_records
+        records = get_session_records(session_id)
+        if records:
+            return records[-1].get("case_state")
+    except Exception:
+        pass
+    return None
+
+
 def invoke_with_timeout(llm, messages, timeout: int = 15):
     """同步调用 LLM，超时则抛出 TimeoutError。"""
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -106,7 +176,8 @@ QA_PROMPT = ChatPromptTemplate.from_messages([
 
 【重要】你始终是回答问题的法律顾问，不是审稿人。即使对话历史中出现过类似问题，也请直接回答当前用户的问题，不要对历史回答进行点评、批改或总结差异。忽略历史中的任何"回答模板"或"示例输出"，只基于当前提供的法律条文回答。不要假设用户有任何"分析"需要纠正。"""),
     MessagesPlaceholder("chat_history"),
-    ("human", """相关法律条文：
+    ("human", """{case_state_context}
+相关法律条文：
 {context}
 
 用户问题：{question}"""),
@@ -147,7 +218,8 @@ QA_MULTI_DOMAIN_PROMPT = ChatPromptTemplate.from_messages([
 
 【重要】你始终是回答问题的法律顾问，不是审稿人。请直接回答当前用户的问题，不要对历史回答进行点评。不要假设用户有任何"分析"需要纠正。"""),
     MessagesPlaceholder("chat_history"),
-    ("human", """涉及的法律领域：{domains}
+    ("human", """{case_state_context}
+涉及的法律领域：{domains}
 
 相关法律条文：
 {context}
@@ -208,8 +280,14 @@ def _contextualize_query(
     llm: BaseChatModel,
     history: List,
     question: str,
+    case_state: Optional[str] = None,
 ) -> str:
     """用对话历史将追问重写为独立完整的法律问题（15s 超时）。"""
+    if case_state:
+        state_text = _format_case_state(case_state)
+        if state_text:
+            from langchain_core.messages import SystemMessage
+            history = list(history) + [SystemMessage(content=state_text)]
     if not history:
         return question
 
@@ -587,7 +665,8 @@ def _retrieve_context(
     _t = time.perf_counter()
     history_obj = _get_session_history(session_id)
     contextualize_llm = components.get("lightweight_llm") or llm
-    contextualized_q = _contextualize_query(contextualize_llm, history_obj.messages, question)
+    _case_state = _get_case_state(session_id)
+    contextualized_q = _contextualize_query(contextualize_llm, history_obj.messages, question, case_state=_case_state)
     timings["contextualize"] = round((time.perf_counter() - _t) * 1000)
 
     # ③ 混合检索（BM25 + 向量 + RRF）
@@ -733,8 +812,10 @@ def ask(
 
     # ⑥ 生成答案
     config = {"configurable": {"session_id": session_id}}
+    _case_state = _get_case_state(session_id)
+    case_state_text = _format_case_state(_case_state) if _case_state else ""
     response = chain_with_history.invoke(
-        {"question": ctx["question"], "context": ctx["context_text"], "domain": ctx["domain"]},
+        {"question": ctx["question"], "context": ctx["context_text"], "domain": ctx["domain"], "case_state_context": case_state_text},
         config=config,
     )
 
@@ -755,12 +836,19 @@ def ask(
         case_top_k = components.get("case_top_k", 3)
         case_results = case_searcher.search(question, top_k=case_top_k, domain=ctx["domain"])
 
+    # 案情状态提取
+    lightweight_llm = components.get("lightweight_llm")
+    new_case_state = None
+    if lightweight_llm:
+        new_case_state = _extract_case_state(lightweight_llm, question, answer_text)
+
     return {
         "answer": answer_text,
         "sources": sources,
         "domain": ctx["domain"],
         "risk_warning": RISK_WARNING,
         "case_results": case_results,
+        "case_state": new_case_state,
     }
 
 
@@ -813,10 +901,13 @@ async def ask_stream(
                    "detail": "上下文扩展"}
 
             config = {"configurable": {"session_id": session_id}}
+            _case_state = _get_case_state(session_id)
+            case_state_text = _format_case_state(_case_state) if _case_state else ""
             stream_input = {
                 "question": ctx["question"],
                 "context": ctx["context_text"],
                 "domain": ctx["domain"],
+                "case_state_context": case_state_text,
             }
 
             _t_gen = time.perf_counter()
@@ -844,11 +935,18 @@ async def ask_stream(
                 case_top_k = components.get("case_top_k", 3)
                 case_results = case_searcher.search(question, top_k=case_top_k, domain=ctx["domain"])
 
+            # 案情状态提取
+            lightweight_llm = components.get("lightweight_llm")
+            new_case_state = None
+            if lightweight_llm:
+                new_case_state = _extract_case_state(lightweight_llm, question, answer_text)
+
             yield {
                 "type": "done",
                 "sources": sources,
                 "risk_warning": RISK_WARNING,
                 "case_results": case_results,
+                "case_state": new_case_state,
                 "timings": {**ctx["timings"], "generate": gen_ms},
             }
     except Exception as e:
@@ -941,20 +1039,26 @@ async def _ask_stream_graph(
             d["domain"] for d in graph_result.get("domains", [])
         )
         prompt = QA_MULTI_DOMAIN_PROMPT
+        _case_state = _get_case_state(session_id)
+        case_state_text = _format_case_state(_case_state) if _case_state else ""
         stream_input = {
             "question": question,
             "context": context_text,
             "domain": domain,
             "domains": domain_names_str,
+            "case_state_context": case_state_text,
         }
     else:
         prompt = QA_PROMPT
         # 使用图中已完成的 query 重写结果，避免重复 LLM 调用
         contextualized_q = graph_result.get("contextualized_question", question)
+        _case_state = _get_case_state(session_id)
+        case_state_text = _format_case_state(_case_state) if _case_state else ""
         stream_input = {
             "question": contextualized_q,
             "context": context_text,
             "domain": domain,
+            "case_state_context": case_state_text,
         }
 
     # 流式生成答案
@@ -1033,6 +1137,12 @@ async def _ask_stream_graph(
         else:
             case_results = case_searcher.search(question, top_k=case_top_k, domain=domain)
 
+    # 案情状态提取
+    lightweight_llm = components.get("lightweight_llm")
+    new_case_state = None
+    if lightweight_llm:
+        new_case_state = _extract_case_state(lightweight_llm, question, answer_text)
+
     yield {
         "type": "done",
         "sources": sources,
@@ -1040,5 +1150,6 @@ async def _ask_stream_graph(
         "domain": domain,
         "multi_domain": is_multi,
         "case_results": case_results,
+        "case_state": new_case_state,
         "timings": _graph_timings,
     }

@@ -223,6 +223,7 @@ async def chat(request: ChatRequest):
             answer=result["answer"],
             sources=result["sources"],
             domain=result.get("domain", "综合"),
+            case_state=result.get("case_state"),
         )
 
         return ChatResponse(
@@ -326,6 +327,7 @@ async def chat_stream(request: ChatRequest):
                     answer=answer_text,
                     sources=sources,
                     domain=event.get("domain", "综合"),
+                    case_state=event.get("case_state"),
                 )
                 # 写入语义缓存
                 if semantic_cache:
