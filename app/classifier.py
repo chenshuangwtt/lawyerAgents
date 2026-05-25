@@ -77,31 +77,56 @@ _CLASSIFY_PROMPT = ChatPromptTemplate.from_messages([
 def classify_question(llm: BaseChatModel, question: str) -> Dict[str, any]:
     """
     对用户问题进行法律领域分类。
-
-    Args:
-        llm: LLM 实例。
-        question: 用户问题。
+    优先关键词快速分类（高置信度直接返回），否则调 LLM。
 
     Returns:
-        {"domain": "劳动", "law_names": ["中华人民共和国劳动合同法"]}
-        law_names 为空列表表示搜索全部法律。
+        {"domain": "劳动", "law_names": [...], "confidence": 0.95, "method": "keyword"}
     """
-    messages = _CLASSIFY_PROMPT.format_messages(question=question)
-    response = llm.invoke(messages)
-    raw = response.content if hasattr(response, "content") else str(response)
-    domain = raw.strip().replace("领域：", "").replace("领域:", "")
+    # 1. 关键词快速分类
+    kw_domain, kw_confidence = classify_by_keywords(question)
+    if kw_confidence >= 0.7:
+        logger.info("[分类-关键词] 领域=%s, 置信度=%.2f", kw_domain, kw_confidence)
+        return {
+            "domain": kw_domain,
+            "law_names": DOMAIN_LAW_MAP.get(kw_domain, []).copy(),
+            "confidence": kw_confidence,
+            "method": "keyword",
+        }
 
-    # 精确匹配
-    if domain in DOMAIN_LAW_MAP:
-        return {"domain": domain, "law_names": DOMAIN_LAW_MAP[domain].copy()}
+    # 2. LLM 兜底
+    try:
+        messages = _CLASSIFY_PROMPT.format_messages(question=question)
+        response = llm.invoke(messages)
+        raw = response.content if hasattr(response, "content") else str(response)
+        domain = raw.strip().replace("领域：", "").replace("领域:", "")
 
-    # Fallback: 关键词匹配
-    for d, keywords in _DOMAIN_KEYWORDS.items():
-        if any(kw in question for kw in keywords):
-            return {"domain": d, "law_names": DOMAIN_LAW_MAP[d].copy()}
+        # 精确匹配
+        if domain in DOMAIN_LAW_MAP:
+            confidence = max(kw_confidence, 0.6)
+            logger.info("[分类-LLM] 领域=%s, 置信度=%.2f", domain, confidence)
+            return {
+                "domain": domain,
+                "law_names": DOMAIN_LAW_MAP[domain].copy(),
+                "confidence": confidence,
+                "method": "llm",
+            }
 
-    # 兜底：综合
-    return {"domain": "综合", "law_names": []}
+        # Fallback: 关键词再匹配
+        for d, keywords in _DOMAIN_KEYWORDS.items():
+            if any(kw in question for kw in keywords):
+                logger.info("[分类-关键词fallback] 领域=%s", d)
+                return {
+                    "domain": d,
+                    "law_names": DOMAIN_LAW_MAP[d].copy(),
+                    "confidence": 0.5,
+                    "method": "keyword_fallback",
+                }
+    except Exception as e:
+        logger.warning("[分类] LLM 失败: %s", e)
+
+    # 3. 兜底
+    logger.info("[分类] 兜底 → 综合")
+    return {"domain": "综合", "law_names": [], "confidence": 0.0, "method": "fallback"}
 
 
 # 多域分类提示词
@@ -117,49 +142,96 @@ def classify_question_multi(
     max_domains: int = 3,
 ) -> Dict[str, any]:
     """
-    多域分类：检测问题是否涉及多个法律领域。
+    多域分类：关键词优先 + LLM 兜底。
 
     Returns:
         {
             "domains": [{"domain": "劳动", "law_names": [...]}],
             "primary_domain": "劳动",
             "is_multi_domain": True/False,
+            "confidence": 0.9,
+            "method": "keyword",
         }
     """
-    messages = _MULTI_CLASSIFY_PROMPT.format_messages(question=question)
-    response = llm.invoke(messages)
-    raw = response.content if hasattr(response, "content") else str(response)
-    raw = raw.strip().replace("领域：", "").replace("领域:", "")
-
-    # 拆分逗号分隔的领域名
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
-
-    domains = []
-    for part in parts[:max_domains]:
-        # 精确匹配
-        if part in DOMAIN_LAW_MAP:
-            domains.append({"domain": part, "law_names": DOMAIN_LAW_MAP[part].copy()})
+    # 1. 关键词扫描所有领域
+    keyword_hits = []
+    for domain, kw_weights in _WEIGHTED_KEYWORDS.items():
+        if domain == "综合":
             continue
-        # 关键词 fallback
-        matched = False
-        for d, keywords in _DOMAIN_KEYWORDS.items():
-            if any(kw in part for kw in keywords):
-                domains.append({"domain": d, "law_names": DOMAIN_LAW_MAP[d].copy()})
-                matched = True
-                break
-        if not matched and not domains:
+        score = 0.0
+        for kw, weight in kw_weights.items():
+            if kw in question:
+                score += weight
+        if score > 0:
+            keyword_hits.append((domain, score))
+
+    keyword_hits.sort(key=lambda x: -x[1])
+
+    # 最高分领域置信度足够时直接返回
+    if keyword_hits:
+        top_domain, top_score = keyword_hits[0]
+        max_single = max(_WEIGHTED_KEYWORDS[top_domain].values())
+        top_confidence = min(top_score / max_single, 1.0)
+        if top_confidence >= 0.7:
+            domains = [{"domain": top_domain, "law_names": DOMAIN_LAW_MAP.get(top_domain, []).copy()}]
+            for d, s in keyword_hits[1:max_domains]:
+                d_max = max(_WEIGHTED_KEYWORDS[d].values())
+                d_conf = min(s / d_max, 1.0)
+                if d_conf >= 0.5:
+                    domains.append({"domain": d, "law_names": DOMAIN_LAW_MAP.get(d, []).copy()})
+            primary = domains[0]["domain"]
+            is_multi = len(domains) > 1 and primary != "综合"
+            logger.info("[多域分类-关键词] domains=%s, multi=%s", [d['domain'] for d in domains], is_multi)
+            return {
+                "domains": domains,
+                "primary_domain": primary,
+                "is_multi_domain": is_multi,
+                "confidence": top_confidence,
+                "method": "keyword",
+            }
+
+    # 2. LLM 兜底
+    try:
+        messages = _MULTI_CLASSIFY_PROMPT.format_messages(question=question)
+        response = llm.invoke(messages)
+        raw = response.content if hasattr(response, "content") else str(response)
+        raw = raw.strip().replace("领域：", "").replace("领域:", "")
+
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        domains = []
+        for part in parts[:max_domains]:
+            if part in DOMAIN_LAW_MAP:
+                domains.append({"domain": part, "law_names": DOMAIN_LAW_MAP[part].copy()})
+                continue
+            matched = False
+            for d, keywords in _DOMAIN_KEYWORDS.items():
+                if any(kw in part for kw in keywords):
+                    domains.append({"domain": d, "law_names": DOMAIN_LAW_MAP[d].copy()})
+                    matched = True
+                    break
+            if not matched and not domains:
+                domains.append({"domain": "综合", "law_names": []})
+
+        if not domains:
             domains.append({"domain": "综合", "law_names": []})
 
-    if not domains:
-        domains.append({"domain": "综合", "law_names": []})
+        primary = domains[0]["domain"]
+        is_multi = len(domains) > 1 and primary != "综合"
 
-    primary = domains[0]["domain"]
-    is_multi = len(domains) > 1 and primary != "综合"
-
-    logger.info("[多域分类] %s → domains=%s, multi=%s", raw, [d['domain'] for d in domains], is_multi)
-
-    return {
-        "domains": domains,
-        "primary_domain": primary,
-        "is_multi_domain": is_multi,
-    }
+        logger.info("[多域分类-LLM] %s → domains=%s, multi=%s", raw, [d['domain'] for d in domains], is_multi)
+        return {
+            "domains": domains,
+            "primary_domain": primary,
+            "is_multi_domain": is_multi,
+            "confidence": 0.6,
+            "method": "llm",
+        }
+    except Exception as e:
+        logger.warning("[多域分类] LLM 失败: %s", e)
+        return {
+            "domains": [{"domain": "综合", "law_names": []}],
+            "primary_domain": "综合",
+            "is_multi_domain": False,
+            "confidence": 0.0,
+            "method": "fallback",
+        }
