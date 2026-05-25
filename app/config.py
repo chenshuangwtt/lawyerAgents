@@ -23,6 +23,12 @@ class Settings:
         default_factory=lambda: os.getenv("EMBEDDING_PROVIDER", "qwen")
     )
 
+    # --- 数据库 ---
+    # PostgreSQL 连接 URL（留空则使用 SQLite）
+    database_url: str = field(
+        default_factory=lambda: os.getenv("DATABASE_URL", "")
+    )
+
     # --- Qwen / DashScope（阿里云百炼）---
     qwen_api_key: str = field(
         default_factory=lambda: os.getenv("QWEN_API_KEY", "")
