@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 from langchain_core.documents import Document
 
-from app.rag_chain import ARTICLE_PATTERN, _chinese_num_to_int
+from app.rag_chain import ARTICLE_PATTERN, PARA_PATTERN, _chinese_num_to_int
 
 
 # 置信度阈值（基于 jieba 分词后的关键词重叠率）
@@ -87,11 +87,18 @@ class CitationVerifier:
             max_confidence = "low"
             for art in article_list:
                 clean_art = re.sub(r"\s*等\d+条$", "", art)
-                art_match = ARTICLE_PATTERN.search(clean_art)
-                if not art_match:
-                    continue
+                # 尝试款级匹配
+                para_match = PARA_PATTERN.search(clean_art)
+                if para_match:
+                    art_num = _chinese_num_to_int(para_match.group(1))
+                    para_num_str = para_match.group(3)  # 款号（中文数字）
+                else:
+                    art_match = ARTICLE_PATTERN.search(clean_art)
+                    if not art_match:
+                        continue
+                    art_num = _chinese_num_to_int(art_match.group(1))
+                    para_num_str = None
 
-                art_num = _chinese_num_to_int(art_match.group(1))
                 if art_num <= 0:
                     continue
 
@@ -100,8 +107,24 @@ class CitationVerifier:
                 if not chunks:
                     continue
 
-                # 用原文与 answer 做相似度比较
-                law_text = chunks[0].page_content[:500]
+                # 有款号时，优先找匹配款的 chunk
+                law_text = ""
+                if para_num_str:
+                    para_int = _chinese_num_to_int(para_num_str)
+                    if para_int > 0:
+                        chinese_digits = "零一二三四五六七八九"
+                        if para_int < 10:
+                            para_label = f"（{chinese_digits[para_int]}）"
+                        else:
+                            para_label = f"（{para_int}）"
+                        for chunk in chunks:
+                            subpara = chunk.metadata.get("subpara", "")
+                            if subpara and para_label in subpara:
+                                law_text = chunk.page_content[:500]
+                                break
+                if not law_text:
+                    law_text = chunks[0].page_content[:500]
+
                 similarity = _compute_text_similarity(law_text, answer)
 
                 if similarity >= HIGH_THRESHOLD:
