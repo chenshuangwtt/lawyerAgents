@@ -127,6 +127,7 @@ retriever = None
 llm = None
 rag_components = None
 semantic_cache = None
+analysis_graph = None
 
 
 # --- 路由 ---
@@ -286,11 +287,34 @@ async def chat_stream(request: ChatRequest):
         sources = []
         risk_warning = ""
 
-        stream = ask_stream(
-            rag_chain, retriever, llm,
-            request.question, request.session_id,
-            components=rag_components,
-        )
+        # Intent detection
+        from app.classifier import classify_question_multi
+        intent = "qa"
+        if analysis_graph and rag_components.get("enable_case_analysis", True):
+            try:
+                classify_result = classify_question_multi(
+                    llm, request.question,
+                    max_domains=rag_components.get("multi_domain_max_domains", 3),
+                )
+                intent = classify_result.get("intent", "qa")
+            except Exception:
+                intent = "qa"
+
+        if intent == "analysis" and analysis_graph:
+            # --- 案情分析路径 ---
+            from app.rag_chain import ask_analysis_stream
+            stream = ask_analysis_stream(
+                analysis_graph, llm,
+                request.question, request.session_id,
+                components=rag_components,
+            )
+        else:
+            # --- 普通 QA 路径 ---
+            stream = ask_stream(
+                rag_chain, retriever, llm,
+                request.question, request.session_id,
+                components=rag_components,
+            )
 
         while True:
             try:
@@ -305,10 +329,12 @@ async def chat_stream(request: ChatRequest):
             event_type = event["type"]
 
             if event_type == "meta":
-                meta_data = {"domain": event["domain"]}
+                meta_data = {"domain": event.get("domain", "综合")}
                 if "domains" in event:
                     meta_data["domains"] = event["domains"]
                     meta_data["multi_domain"] = event.get("multi_domain", False)
+                if "intent" in event:
+                    meta_data["intent"] = event["intent"]
                 yield f"event: meta\ndata: {json.dumps(meta_data, ensure_ascii=False)}\n\n"
 
             elif event_type == "substep":
