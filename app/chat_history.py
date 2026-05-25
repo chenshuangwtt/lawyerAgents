@@ -117,7 +117,7 @@ def get_session_records(session_id: str) -> List[Dict[str, Any]]:
     with _lock:
         conn = _get_conn()
         rows = conn.execute(
-            "SELECT id, session_id, question, answer, sources, created_at FROM chat_history WHERE session_id = ? ORDER BY id ASC",
+            "SELECT id, session_id, question, answer, sources, domain, case_state, created_at FROM chat_history WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
@@ -128,7 +128,7 @@ def get_history(limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
     with _lock:
         conn = _get_conn()
         rows = conn.execute(
-            "SELECT id, session_id, question, answer, sources, created_at FROM chat_history ORDER BY id DESC LIMIT ? OFFSET ?",
+            "SELECT id, session_id, question, answer, sources, domain, case_state, created_at FROM chat_history ORDER BY id DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
@@ -139,7 +139,7 @@ def get_record_by_id(record_id: int) -> Optional[Dict[str, Any]]:
     with _lock:
         conn = _get_conn()
         row = conn.execute(
-            "SELECT id, session_id, question, answer, sources, created_at FROM chat_history WHERE id = ?",
+            "SELECT id, session_id, question, answer, sources, domain, case_state, created_at FROM chat_history WHERE id = ?",
             (record_id,),
         ).fetchone()
         return _row_to_dict(row) if row else None
