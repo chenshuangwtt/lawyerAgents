@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
+from app.storage_paths import get_app_db_path
+
 load_dotenv()
 
 
@@ -27,6 +29,10 @@ class Settings:
     # PostgreSQL 连接 URL（留空则使用 SQLite）
     database_url: str = field(
         default_factory=lambda: os.getenv("DATABASE_URL", "")
+    )
+    # 本地运行时 SQLite：会话、反馈、语义缓存共用；语料索引库仍独立。
+    app_db_path: str = field(
+        default_factory=get_app_db_path
     )
 
     # --- Qwen / DashScope（阿里云百炼）---
@@ -89,6 +95,27 @@ class Settings:
     )
     data_dir: str = field(
         default_factory=lambda: os.getenv("DATA_DIR", "./data")
+    )
+    # 法律文书启动加载时排除的 data 子目录。
+    # 司法解释和指导性案例体量较大，运行时分别通过专门索引/案例库使用，不随主法条库全量读取。
+    data_exclude_dirs: str = field(
+        default_factory=lambda: os.getenv("DATA_EXCLUDE_DIRS", "司法解释,指导性案例,official_cases,CaseMatch,db,eval")
+    )
+    # 司法解释按需检索：启动只扫文件名，回答/案情分析时按问题读取少量相关 docx
+    enable_interpretation_retrieval: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_INTERPRETATION_RETRIEVAL", "true").lower() == "true"
+    )
+    interpretation_dir: str = field(
+        default_factory=lambda: os.getenv("INTERPRETATION_DIR", "./data/司法解释")
+    )
+    interpretation_db_path: str = field(
+        default_factory=lambda: os.getenv("INTERPRETATION_DB_PATH", "./data/db/interpretations.sqlite3")
+    )
+    interpretation_top_k: int = field(
+        default_factory=lambda: int(os.getenv("INTERPRETATION_TOP_K", "2"))
+    )
+    interpretation_candidate_files: int = field(
+        default_factory=lambda: int(os.getenv("INTERPRETATION_CANDIDATE_FILES", "3"))
     )
     # 文本分块大小（字符数）：每个 chunk 的最大长度
     #   调大 → 每条法条上下文更完整，但语义粒度变粗，检索精确度下降
@@ -184,6 +211,32 @@ class Settings:
     enable_case_retrieval: bool = field(
         default_factory=lambda: os.getenv("ENABLE_CASE_RETRIEVAL", "true").lower() == "true"
     )
+    # 官方精选案例库：小规模、人工整理、默认参与主流程
+    use_official_cases: bool = field(
+        default_factory=lambda: os.getenv("USE_OFFICIAL_CASES", "true").lower() == "true"
+    )
+    # 历史 LeCaRD / CaseMatch 案例库：体量大且偏实验，默认不参与主流程
+    use_legacy_cases: bool = field(
+        default_factory=lambda: os.getenv("USE_LEGACY_CASES", "false").lower() == "true"
+    )
+    official_case_source: str = field(
+        default_factory=lambda: os.getenv("OFFICIAL_CASE_SOURCE", "manual_json")
+    )
+    official_case_raw_dir: str = field(
+        default_factory=lambda: os.getenv("OFFICIAL_CASE_RAW_DIR", "./data/official_cases/raw")
+    )
+    official_case_processed_file: str = field(
+        default_factory=lambda: os.getenv("OFFICIAL_CASE_PROCESSED_FILE", "./data/official_cases/processed/official_cases.jsonl")
+    )
+    official_case_collection: str = field(
+        default_factory=lambda: os.getenv("OFFICIAL_CASE_COLLECTION", "official_cases")
+    )
+    official_case_top_k: int = field(
+        default_factory=lambda: int(os.getenv("OFFICIAL_CASE_TOP_K", "3"))
+    )
+    legacy_case_top_k: int = field(
+        default_factory=lambda: int(os.getenv("LEGACY_CASE_TOP_K", "0"))
+    )
     # 案例数据库路径（SQLite）
     case_db_path: str = field(
         default_factory=lambda: os.getenv("CASE_DB_PATH", "./data/CaseMatch/cases.sqlite3")
@@ -251,6 +304,40 @@ class Settings:
         default_factory=lambda: int(os.getenv("SEMANTIC_CACHE_MAX_ITEMS", "1000"))
     )
 
+    # --- SSE/LLM 超时 ---
+    sse_keepalive_seconds: int = field(
+        default_factory=lambda: int(os.getenv("SSE_KEEPALIVE_SECONDS", "15"))
+    )
+    llm_timeout_seconds: int = field(
+        default_factory=lambda: int(os.getenv("LLM_TIMEOUT_SECONDS", "15"))
+    )
+
+    # --- 接口鉴权 ---
+    app_env: str = field(
+        default_factory=lambda: os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).lower()
+    )
+    allow_insecure_local: bool = field(
+        default_factory=lambda: os.getenv(
+            "ALLOW_INSECURE_LOCAL",
+            "false" if os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).lower() == "production" else "true",
+        ).lower() == "true"
+    )
+    admin_api_key: str = field(
+        default_factory=lambda: os.getenv("ADMIN_API_KEY", "")
+    )
+    # 聊天/会话接口鉴权（留空则不鉴权）
+    chat_api_key: str = field(
+        default_factory=lambda: os.getenv("CHAT_API_KEY", "")
+    )
+
+    # --- 速率限制 ---
+    rate_limit_requests: int = field(
+        default_factory=lambda: int(os.getenv("RATE_LIMIT_REQUESTS", "30"))
+    )
+    rate_limit_window: int = field(
+        default_factory=lambda: int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+    )
+
     # --- 案情分析 ---
     enable_case_analysis: bool = field(
         default_factory=lambda: os.getenv("ENABLE_CASE_ANALYSIS", "true").lower() == "true"
@@ -268,10 +355,14 @@ class Settings:
         "enable_rerank", "adjacent_range",
         "enable_weighted_merge", "enable_intelligent_expansion",
         "expansion_depth", "enable_semantic_verification",
+        "enable_interpretation_retrieval", "interpretation_top_k",
+        "interpretation_candidate_files",
         "enable_case_retrieval", "case_top_k",
+        "use_official_cases", "use_legacy_cases", "official_case_top_k", "legacy_case_top_k",
         "multi_domain_max_domains",
         "enable_semantic_cache", "semantic_cache_threshold",
         "enable_case_analysis", "analysis_max_claims", "analysis_retrieval_top_k",
+        "sse_keepalive_seconds", "llm_timeout_seconds",
     }
 
     def update(self, updates: dict) -> list[str]:

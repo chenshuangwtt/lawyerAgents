@@ -6,6 +6,13 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.pytest_tmp/
+.pytest_work/
+.coverage
+.coverage.*
+.test_chat_history_tmp/
+.test_interpretation_searcher_tmp/
+.test_official_cases_tmp/
 
 # 向量库 & 缓存
 chroma_db/
@@ -13,6 +20,8 @@ models_cache/
 
 # 案例库（通过 scripts/download_cases.py 获取）
 data/CaseMatch/
+# 官方精选案例 SQLite 为导入脚本生成的本地索引，JSONL 可按需提交
+data/official_cases/processed/*.sqlite3*
 
 # 运行时数据
 data/db/
@@ -21,6 +30,8 @@ logs/
 
 # 环境变量（含 API Key，勿提交）
 .env
+.env.*
+!.env.example
 
 # Node
 node_modules/
@@ -29,6 +40,9 @@ frontend/dist/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# IDE
+.idea/
 
 # 脚本
 _*.py

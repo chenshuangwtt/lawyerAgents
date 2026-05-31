@@ -13,6 +13,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
+from pydantic import BaseModel, Field
+
 logger = logging.getLogger(__name__)
 
 
@@ -274,6 +276,171 @@ DOCUMENT_TEMPLATES["contract_review"] = DocumentTemplate(
 *本审查意见由 AI 辅助生成，仅供参考。重要合同请由专业律师审核。*
 """,
 )
+
+
+# --- 结构化输出 Pydantic 模型 ---
+
+class LaborArbitrationFields(BaseModel):
+    """劳动仲裁申请书字段"""
+    applicant: str = Field(description="申请人信息：姓名，性别，出生日期，身份证号，住址，联系电话")
+    respondent: str = Field(description="被申请人信息：公司全称，法定代表人，地址，联系电话")
+    claims: str = Field(description="仲裁请求，逐条列明，每条明确具体金额或行为")
+    facts_and_reasons: str = Field(description="事实与理由，需引用相关法律条文")
+    evidence_list: str = Field(description="证据清单，逐条列明")
+    arbitration_committee: str = Field(description="仲裁委员会名称，如XX市劳动人事争议仲裁委员会")
+    date: str = Field(description="申请日期，如2025年1月1日")
+
+
+class CivilComplaintFields(BaseModel):
+    """民事起诉状字段"""
+    plaintiff: str = Field(description="原告信息：姓名，性别，出生日期，身份证号，住址，联系电话")
+    defendant: str = Field(description="被告信息：姓名或公司名，法定代表人，地址，联系电话")
+    claims: str = Field(description="诉讼请求，逐条列明，明确具体金额")
+    facts_and_reasons: str = Field(description="事实与理由，需引用《民法典》等相关法条")
+    evidence_list: str = Field(description="证据清单，逐条列明")
+    court_name: str = Field(description="管辖法院名称，如XX人民法院")
+    date: str = Field(description="起诉日期")
+
+
+class LawyerLetterFields(BaseModel):
+    """律师函字段"""
+    sender: str = Field(description="委托人信息：姓名或公司名，地址，联系方式")
+    recipient: str = Field(description="收函人信息：姓名或公司名，地址")
+    facts: str = Field(description="事实陈述，简明扼要")
+    legal_basis: str = Field(description="法律依据，列出适用的法律条文")
+    demands: str = Field(description="具体要求，逐条列明，必须可执行")
+    deadline: str = Field(description="履行期限，如收到本函之日起7日内")
+    consequences: str = Field(description="逾期未履行的法律后果")
+    date: str = Field(description="发函日期")
+
+
+class RiskPoint(BaseModel):
+    """合同风险点"""
+    clause: str = Field(description="条款编号，如第3条")
+    risk: str = Field(description="风险描述")
+    severity: str = Field(description="严重程度：高/中/低")
+
+
+class Suggestion(BaseModel):
+    """合同修改建议"""
+    clause: str = Field(description="条款编号")
+    original: str = Field(description="原文内容")
+    suggested: str = Field(description="建议修改为")
+    reason: str = Field(description="修改理由")
+
+
+class ContractReviewFields(BaseModel):
+    """合同审查意见字段"""
+    contract_name: str = Field(description="合同名称")
+    contract_type: str = Field(description="合同类型，如买卖合同/劳动合同/租赁合同/服务合同")
+    risk_points: List[RiskPoint] = Field(description="风险点列表，至少3个主要风险")
+    suggestions: List[Suggestion] = Field(description="修改建议列表，针对高风险点")
+    overall_assessment: str = Field(description="总体评估，概括主要风险和建议")
+
+
+# 文书类型 → Pydantic 模型映射
+DOCUMENT_SCHEMAS = {
+    "labor_arbitration": LaborArbitrationFields,
+    "civil_complaint": CivilComplaintFields,
+    "lawyer_letter": LawyerLetterFields,
+    "contract_review": ContractReviewFields,
+}
+
+
+async def extract_fields_structured(
+    llm,
+    doc_type: str,
+    context: str,
+    case_state: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    """直接调 DashScope API 提取文书字段，绕过 LangChain 避免 async 兼容问题。
+
+    直接返回 dict，无需 JSON 解析。异常时返回 {"error": "..."}。
+    """
+    import httpx
+
+    schema = DOCUMENT_SCHEMAS.get(doc_type)
+    template = DOCUMENT_TEMPLATES.get(doc_type)
+    if not schema or not template:
+        return {"error": f"不支持的文书类型：{doc_type}"}
+
+    # 合并 case_state 上下文
+    parts = []
+    if case_state:
+        cs = extract_fields_from_case_state(case_state)
+        if cs:
+            parts.append(cs)
+    parts.append(f"案情描述：\n{context}")
+    full_context = "\n\n".join(parts)[:4000]
+
+    prompt = (
+        f"你是一位资深法律文书撰写专家。请从以下内容中提取{template.name}所需的全部字段。\n\n"
+        f"{full_context}\n\n"
+        f"规则：\n"
+        f"- 如果某字段信息不足，基于已有信息合理推断，用\"[待补充]\"标注缺失部分\n"
+        f"- claims 必须逐条列明\n"
+        f"- facts_and_reasons 需引用相关法律条文"
+    )
+
+    # 从 llm 对象提取 API 配置
+    api_key = llm.openai_api_key.get_secret_value() if hasattr(llm.openai_api_key, 'get_secret_value') else str(llm.openai_api_key)
+    base_url = str(llm.openai_api_base or "https://api.openai.com/v1").rstrip('/')
+    model = llm.model_name
+
+    # DashScope 的 structured output 通过 response_format + json_schema 实现
+    json_schema = schema.model_json_schema()
+    # 修正 schema：DashScope 不支持 additionalProperties: false（Pydantic v2 默认行为）
+    _strip_additional_properties(json_schema)
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是法律文书撰写专家，严格按 JSON Schema 输出。"},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": doc_type, "schema": json_schema, "strict": True},
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        content = data["choices"][0]["message"]["content"]
+        raw_fields = json.loads(content)
+
+        # 用 Pydantic 验证并填充默认值
+        validated = schema(**raw_fields)
+        fields = validated.model_dump()
+        logger.info("[结构化提取] %s 提取完成，字段数=%d", doc_type, len(fields))
+        return fields
+    except Exception as e:
+        logger.exception("[结构化提取] %s 失败", doc_type)
+        return {"error": f"{template.name}字段提取失败：{e}"}
+
+
+def _strip_additional_properties(schema: dict):
+    """递归移除 JSON Schema 中的 additionalProperties（DashScope 不支持）。"""
+    if isinstance(schema, dict):
+        schema.pop("additionalProperties", None)
+        schema.pop("$schema", None)
+        schema.pop("title", None)
+        for v in schema.values():
+            if isinstance(v, dict):
+                _strip_additional_properties(v)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        _strip_additional_properties(item)
 
 
 def _format_risk_points(risk_points: Any) -> str:

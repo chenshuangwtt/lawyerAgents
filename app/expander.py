@@ -39,7 +39,7 @@ def _collect_candidates(
     # 跨条引用
     ref_str = doc.metadata.get("referenced_articles", "")
     if ref_str:
-        from app.rag_chain import ARTICLE_PATTERN, _chinese_num_to_int
+        from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
         for ref_art in ref_str.split(","):
             ref_art = ref_art.strip()
             if not ref_art:
@@ -108,8 +108,8 @@ def _judge_relevance_batch(
                 if 0 <= idx < len(candidates):
                     indices.append(idx)
         return indices
-    except Exception:
-        # LLM 调用失败时保留全部
+    except Exception as e:
+        logger.debug("[智能拓展] LLM 调用失败，保留全部: %s", e)
         return list(range(len(candidates)))
 
 
@@ -184,7 +184,7 @@ def expand_context_with_agent(
 
 def _rule_based_expand(reranked_docs, article_index, all_chunks, adjacent_range):
     """纯规则拓展（与原有逻辑等价）。"""
-    from app.rag_chain import ARTICLE_PATTERN, _chinese_num_to_int
+    from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
 
     expanded_docs = list(reranked_docs)
     if article_index and adjacent_range > 0:

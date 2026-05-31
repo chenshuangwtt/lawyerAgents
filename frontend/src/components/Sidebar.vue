@@ -2,8 +2,8 @@
 import { ref, onMounted } from 'vue'
 import { getSessions, deleteSession, togglePinSession, exportSession } from '../api.js'
 
-const props = defineProps({ sessionId: String })
-const emit = defineEmits(['newSession', 'close', 'selectSession'])
+const props = defineProps({ sessionId: String, view: { type: String, default: 'chat' } })
+const emit = defineEmits(['newSession', 'close', 'selectSession', 'switchView'])
 
 const sessions = ref([])
 
@@ -71,6 +71,7 @@ defineExpose({ refresh: loadSessions })
     <div class="p-3">
       <button
         @click="onAddSession"
+        aria-label="新建会话"
         class="w-full py-2 rounded-xl bg-white hover:bg-gray-100 text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2 text-gray-600 hover:text-gray-800 border border-gray-200 hover:border-gray-300"
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -104,6 +105,7 @@ defineExpose({ refresh: loadSessions })
               class="w-6 h-6 rounded flex items-center justify-center transition-all cursor-pointer"
               :class="s.pinned ? 'text-amber-500 hover:bg-amber-50' : 'text-gray-400 hover:text-amber-500 hover:bg-amber-50'"
               :title="s.pinned ? '取消置顶' : '置顶'"
+              :aria-label="s.pinned ? '取消置顶' : '置顶'"
             >
               <svg class="w-3.5 h-3.5" :fill="s.pinned ? 'currentColor' : 'none'" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"/>
@@ -113,6 +115,7 @@ defineExpose({ refresh: loadSessions })
               @click="exportSession(s.session_id)"
               class="w-6 h-6 rounded flex items-center justify-center text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-all cursor-pointer"
               title="导出 Markdown"
+              aria-label="导出为 Markdown"
             >
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
@@ -129,6 +132,7 @@ defineExpose({ refresh: loadSessions })
             @click="onDelete($event, s.session_id)"
             class="ml-auto w-5 h-5 rounded flex items-center justify-center opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all cursor-pointer"
             title="删除"
+            aria-label="删除会话"
           >
             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
@@ -137,5 +141,21 @@ defineExpose({ refresh: loadSessions })
         </div>
       </div>
     </nav>
+
+    <!-- 底部：反馈管理 -->
+    <div class="p-3 border-t border-gray-200">
+      <button
+        class="w-full py-2 rounded-xl text-sm font-medium transition-all cursor-pointer flex items-center justify-center gap-2"
+        :class="view === 'admin'
+          ? 'bg-blue-50 text-blue-600 border border-blue-200'
+          : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200 hover:border-gray-300'"
+        @click="emit('switchView', view === 'admin' ? 'chat' : 'admin')"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+        </svg>
+        {{ view === 'admin' ? '返回咨询' : '反馈管理' }}
+      </button>
+    </div>
   </aside>
 </template>

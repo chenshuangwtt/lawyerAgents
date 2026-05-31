@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { sendMessageStream, getLaws, sendDocumentStream, submitFeedback } from '../api.js'
+import { sendMessageStream, sendDocumentStream, getLaws, submitFeedback } from '../api.js'
 import MessageBubble from './MessageBubble.vue'
 
 const props = defineProps({
@@ -16,6 +16,7 @@ const atBottom = ref(true)
 const showBackBottom = ref(false)
 const textareaRef = ref(null)
 const isAutoScrolling = ref(false)
+let currentAbortController = null
 
 const suggestions = [
   { label: '劳动纠纷', q: '劳动合同的试用期最长是多久？试用期工资怎么算？' },
@@ -103,6 +104,7 @@ watch(
   { flush: 'post' }
 )
 watch(() => props.sessionId, () => {
+  currentAbortController?.abort()
   input.value = ''
   atBottom.value = true
   showBackBottom.value = false
@@ -133,6 +135,8 @@ async function onSend() {
     cached: false,
     intent: '',
     case_state: null,
+    document_result: null,
+    missing_fields: [],
     record_id: null,
     feedback: null,
     time: new Date().toLocaleTimeString(),
@@ -141,6 +145,8 @@ async function onSend() {
   })
 
   loading.value = true
+  currentAbortController?.abort()
+  currentAbortController = new AbortController()
   try {
     await sendMessageStream(q, props.sessionId, {
       onMeta(data) {
@@ -161,6 +167,25 @@ async function onSend() {
             detail: data.detail || '',
             domain: data.domain || '',
           })
+          // substep 更新时也滚动
+          if (atBottom.value) requestAnimationFrame(scrollBottom)
+        }
+      },
+      onSourcesPreview() {},
+      onSourcesReady(data) {
+        const msg = props.messages[msgIndex]
+        if (msg) {
+          msg.sources = data.sources || []
+          msg.risk_warning = data.risk_warning || ''
+          msg.case_results = data.case_results || []
+          if (data.case_state) {
+            msg.case_state = typeof data.case_state === 'string'
+              ? JSON.parse(data.case_state) : data.case_state
+          }
+          if (data.record_id) msg.record_id = data.record_id
+          // 法条就绪后立即解锁输入框（案情提取可能还在后台进行）
+          msg.streaming = false
+          if (atBottom.value) requestAnimationFrame(scrollBottom)
         }
       },
       onToken(data) {
@@ -174,11 +199,17 @@ async function onSend() {
       onDone(data) {
         const msg = props.messages[msgIndex]
         if (msg) {
-          msg.sources = data.sources || []
-          msg.risk_warning = data.risk_warning || ''
-          msg.case_results = data.case_results || []
-          if (data.case_state) msg.case_state = data.case_state
+          // done 携带数据时更新（普通问答流），否则保留已有数据（分析流由 sources_ready 设置）
+          if (data.sources?.length) msg.sources = data.sources
+          if (data.risk_warning) msg.risk_warning = data.risk_warning
+          if (data.case_results?.length) msg.case_results = data.case_results
+          if (data.case_state) {
+            msg.case_state = typeof data.case_state === 'string'
+              ? JSON.parse(data.case_state) : data.case_state
+          }
           if (data.record_id) msg.record_id = data.record_id
+          if (data.document_result) msg.document_result = data.document_result
+          if (data.missing_fields) msg.missing_fields = data.missing_fields
           if (data.cached) msg.cached = true
           msg.streaming = false
         }
@@ -190,7 +221,7 @@ async function onSend() {
           msg.streaming = false
         }
       },
-    })
+    }, currentAbortController.signal)
   } catch {
     const msg = props.messages[msgIndex]
     if (msg) {
@@ -205,14 +236,13 @@ async function onSend() {
 
 function onSuggestion(q) { input.value = q; onSend() }
 
-function onGenerateDocument({ document_type, case_state }) {
+function onGenerateDocument({ document_type, doc_type, action, source, case_analysis_id, case_state }) {
   const docLabels = {
+    labor_arbitration_application: '劳动仲裁申请书',
     labor_arbitration: '劳动仲裁申请书',
-    civil_complaint: '民事起诉状',
-    lawyer_letter: '律师函',
-    contract_review: '合同审查意见',
   }
-  const label = docLabels[document_type] || document_type
+  const resolvedType = doc_type || document_type || 'labor_arbitration_application'
+  const label = docLabels[resolvedType] || resolvedType
 
   // 添加用户消息
   props.messages.push({ role: 'user', content: `生成${label}`, time: new Date().toLocaleTimeString() })
@@ -230,16 +260,24 @@ function onGenerateDocument({ document_type, case_state }) {
     cached: false,
     intent: 'document',
     case_state: null,
+    document_result: null,
+    missing_fields: [],
     time: new Date().toLocaleTimeString(),
     streaming: true,
     substeps: [],
   })
 
   loading.value = true
+  currentAbortController?.abort()
+  currentAbortController = new AbortController()
 
-  sendDocumentStream(document_type, {
+  sendDocumentStream(resolvedType, {
     case_state: case_state,
     sessionId: props.sessionId,
+    action: action || 'generate_document',
+    source: source || 'case_analysis',
+    case_analysis_id: case_analysis_id || case_state?.case_analysis_id || '',
+    doc_type: resolvedType,
   }, {
     onMeta(data) {
       const msg = props.messages[msgIndex]
@@ -252,8 +290,11 @@ function onGenerateDocument({ document_type, case_state }) {
       const msg = props.messages[msgIndex]
       if (msg) {
         msg.substeps.push({ step: data.step || '', elapsed_ms: data.elapsed_ms || 0, detail: data.detail || '' })
+        if (atBottom.value) requestAnimationFrame(scrollBottom)
       }
     },
+    onSourcesPreview() {},
+    onSourcesReady() {},
     onToken(data) {
       const msg = props.messages[msgIndex]
       if (msg) {
@@ -264,10 +305,12 @@ function onGenerateDocument({ document_type, case_state }) {
     onDone(data) {
       const msg = props.messages[msgIndex]
       if (msg) {
-        msg.sources = data.sources || []
-        msg.risk_warning = data.risk_warning || ''
-        msg.streaming = false
-      }
+          msg.sources = data.sources || []
+          msg.risk_warning = data.risk_warning || ''
+          if (data.document_result) msg.document_result = data.document_result
+          if (data.missing_fields) msg.missing_fields = data.missing_fields
+          msg.streaming = false
+        }
       loading.value = false
       emit('messageSent')
     },
@@ -280,7 +323,7 @@ function onGenerateDocument({ document_type, case_state }) {
       loading.value = false
       emit('messageSent')
     },
-  })
+  }, currentAbortController.signal)
 }
 
 function onFeedback({ record_id, feedback }) {
@@ -408,6 +451,8 @@ watch(() => input.value, () => nextTick(adjustHeight))
           :substeps="msg.substeps"
           :intent="msg.intent"
           :case_state="msg.case_state"
+          :document_result="msg.document_result"
+          :missing_fields="msg.missing_fields"
           :record_id="msg.record_id"
           :feedback="msg.feedback"
           @generateDocument="onGenerateDocument"
@@ -441,6 +486,7 @@ watch(() => input.value, () => nextTick(adjustHeight))
             @keydown="onKeydown"
             :disabled="loading"
             placeholder="输入法律问题..."
+            aria-label="输入法律问题"
             rows="1"
             class="flex-1 resize-none bg-transparent text-sm text-gray-800 placeholder-gray-400 focus:outline-none leading-6"
             style="max-height: 140px;"
@@ -448,6 +494,7 @@ watch(() => input.value, () => nextTick(adjustHeight))
           <button
             @click="onSend"
             :disabled="loading || !input.trim()"
+            aria-label="发送"
             class="shrink-0 w-8 h-8 rounded-xl flex items-center justify-center transition-all cursor-pointer"
             :class="input.trim() && !loading
               ? 'bg-blue-600 text-white hover:bg-blue-500 shadow-sm'

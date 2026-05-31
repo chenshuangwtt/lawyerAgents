@@ -13,7 +13,8 @@ from langgraph.types import Send
 from typing_extensions import TypedDict
 
 from app.classifier import classify_question_multi
-from app.rag_chain import _retrieve_context, _contextualize_query, _get_session_history, invoke_with_timeout
+from app.core import _get_session_history, invoke_with_timeout
+from app.rag_chain import _retrieve_context, _contextualize_query
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,18 @@ def set_graph_components(retriever, llm, lightweight_llm, components, max_domain
 # --- 节点 ---
 
 def classify(state: AgentState) -> dict:
-    """① 多域分类"""
+    """① 多域分类（优先使用预计算结果）"""
+    # 复用 API 层已有的分类结果，避免重复 LLM 调用
+    precomputed = state.get("_classify_result")
+    if precomputed and precomputed.get("domains"):
+        logger.info("[分类] 复用预计算结果: domain=%s, multi=%s",
+                     precomputed.get("primary_domain", ""),
+                     precomputed.get("is_multi_domain", False))
+        return {
+            "domains": precomputed["domains"],
+            "domain": precomputed.get("primary_domain", precomputed["domains"][0]["domain"]),
+            "is_multi_domain": precomputed.get("is_multi_domain", False),
+        }
     try:
         result = classify_question_multi(_llm, state["question"], max_domains=_max_domains)
     except TimeoutError:

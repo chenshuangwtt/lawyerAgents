@@ -1,8 +1,8 @@
 # 法律顾问 Agent
 
-基于 RAG（检索增强生成）架构的中国法律智能咨询系统。加载 **16 部法律全文 + 506 条司法解释**构建知识库，覆盖 **14 个法律领域**，通过混合检索 + Rerank 精排 + 多轮记忆，提供专业法律咨询。
+基于 RAG（检索增强生成）架构的中国法律智能咨询系统。默认加载核心法律全文构建主知识库，司法解释使用独立检索库按需补充，覆盖 **14 个法律领域**，通过混合检索 + Rerank 精排 + 多轮记忆，提供专业法律咨询。
 
-引入 LangGraph 构建多 Agent 协作图，单域问题走快速路径，多域问题自动拆解为并行检索后合并答案。
+引入 LangGraph 构建多 Agent 协作图，单域问题走快速路径，多域问题自动拆解为并行检索后合并答案。支持**智能案情分析**、**诉讼时效计算**、**法律文书生成**、**用户反馈管理**四大进阶功能。
 
 ## 主流程
 
@@ -74,45 +74,73 @@ lawyerAgents/
 │       ├── 最高人民法院关于审理劳动争议案件...
 │       └── ...
 │
+├── start.sh / start.bat               # 一键启动脚本（检查环境→安装依赖→启动前后端）
 ├── app/                               # Python 后端包
 │   ├── config.py                      # 配置中心（.env → dataclass）
 │   ├── law_registry.yaml              # 法律领域注册表（新增法律只需编辑此文件）
 │   ├── law_registry.py                # 领域注册加载器
 │   ├── llm_factory.py                 # LLM / Embedding 工厂
 │   ├── loader.py                      # 文档加载 + 文本分割 + 条号提取
-│   ├── vectorstore.py                 # ChromaDB 向量库（自动感知文件变更）
-│   ├── classifier.py                  # LLM 问题分类
+│   ├── vectorstore.py                 # ChromaDB 向量库（原子构建，自动感知文件变更）
+│   ├── classifier.py                  # 意图分类（qa/analysis/statute/document）+ 领域分类
 │   ├── hybrid_retriever.py            # BM25 检索器 + RRF 融合
 │   ├── reranker.py                    # DashScope Rerank API（返回相关性分数）
 │   ├── article_index.py               # 法条条号内存索引（前后条查找）
 │   ├── expander.py                    # 上下文智能拓展 Sub Agent（LLM 批量相关性判断）
 │   ├── citation_verifier.py           # 引用语义溯源（置信度标注 + 遗漏检测）
 │   ├── case_loader.py                 # 案例检索（FTS5 + LanceDB 语义 + RRF 融合）
-│   ├── rag_chain.py                   # RAG 链（集成全流程）
+│   ├── core.py                        # 共享工具（常量、会话管理、LLM 调用、格式化）
+│   ├── rag_chain.py                   # RAG 主编排链（分类、重写、检索、生成、后处理）
+│   ├── rag_retrieval.py               # RAG 混合召回、精排、法条上下文扩展
+│   ├── rag_context.py                 # RAG 上下文拼装、司法解释合并、参考案例上下文
+│   ├── rag_citations.py               # RAG 来源格式化与引用校验
+│   ├── analysis_chain.py              # 案情分析流式处理链
+│   ├── statute_chain.py               # 诉讼时效流式处理链
+│   ├── document_chain.py              # 法律文书流式处理链
+│   ├── labor_arbitration.py           # 劳动仲裁申请书字段抽取 + 模板生成
+│   ├── case_analysis_store.py         # 当前进程案情分析结果缓存
+│   ├── document_state.py              # 文书生成缺失字段补充状态
 │   ├── graph.py                       # LangGraph 多域协作图（并行检索+加权合并）
-│   ├── chat_history.py                # SQLite 问答记录 + 会话置顶
+│   ├── analysis_graph.py              # 案情分析图（拆解→并行检索→交叉分析→报告）
+│   ├── statute.py                     # 诉讼时效计算（5 种时效类型规则计算）
+│   ├── document_generator.py          # 历史通用文书生成器（当前演示闭环不默认启用）
+│   ├── chat_history.py                # PostgreSQL/SQLite 双后端问答记录 + 反馈存储
+│   ├── chat_history_schema.py         # 会话库 schema 初始化与旧 SQLite 迁移
 │   ├── memory_compression.py          # 记忆压缩（滑动窗口+摘要+Token裁剪）
-│   ├── semantic_cache.py              # 语义缓存（精确+语义双层匹配）
+│   ├── semantic_cache.py              # 语义缓存（线程安全，精确+语义双层匹配）
+│   ├── storage_paths.py               # 本地持久化路径统一管理
+│   ├── sanitizer.py                   # 输入清洗（HTML 标签剥离、prompt 注入检测）
+│   ├── service_context.py             # FastAPI 服务依赖容器（便于测试注入）
+│   ├── sse.py                         # SSE 事件模型、序列化与流式控制
+│   ├── middleware.py                  # 中间件（速率限制、API Key 鉴权、请求指标）
 │   ├── logger.py                      # 统一日志配置
-│   └── api.py                         # FastAPI REST 接口
+│   └── api.py                         # FastAPI REST 接口（并行缓存 + 流式降级）
 │
 ├── frontend/                          # Vue 3 + TailwindCSS 4
 │   └── src/
-│       ├── App.vue                    # 根布局
-│       ├── api.js                     # API 请求封装
+│       ├── App.vue                    # 根布局（chat/admin 视图切换）
+│       ├── api.js                     # API 请求封装（SSE 流式 + 重试）
 │       └── components/
 │           ├── ChatPanel.vue          # 对话区（示例问题、领域选择器、流水线进度）
-│           ├── MessageBubble.vue      # 消息气泡（领域标签、案例卡片、风险提示）
-│           ├── Sidebar.vue            # 会话管理（新建、切换、删除、导出）
-│           └── SourceCard.vue         # 参考法条标签（可点击跳转法规原文）
+│           ├── MessageBubble.vue      # 消息气泡（领域标签、案例卡片、意图标签、文书按钮、反馈按钮）
+│           ├── Sidebar.vue            # 会话管理（新建、切换、删除、导出、反馈管理入口）
+│           ├── SourceCard.vue         # 参考法条标签（可点击跳转法规原文）
+│           └── FeedbackAdmin.vue      # 反馈管理后台（统计面板 + 差评审核 + 回答修正）
 │
 ├── scripts/
 │   ├── fetch_interpretations.py       # 司法解释爬虫（flk.npc.gov.cn）
+│   ├── build_interpretation_db.py     # 构建司法解释独立 SQLite 检索库
 │   ├── download_cases.py              # 从 HuggingFace 下载案例库
 │   └── build_case_db.py               # 从 JSONL 重建案例 SQLite
 │
 └── data/
-    └── CaseMatch/                     # 案例库（.gitignore，需手动下载）
+    ├── db/
+    │   ├── app.sqlite3                # 运行时库：会话、反馈、语义缓存
+    │   └── interpretations.sqlite3    # 司法解释独立检索库（可重建）
+    ├── official_cases/                # 官方精选案例库（人工整理，小规模默认启用）
+    │   ├── raw/                       # 刑事/民事/行政/执行/国家赔偿 原始 JSON
+    │   └── processed/                 # official_cases.jsonl + SQLite 检索库
+    └── CaseMatch/                     # 历史类案库（默认关闭，需手动下载）
         ├── cases.sqlite3              # SQLite + FTS5 全文检索
         └── lancedb/                   # LanceDB 向量库（首次启动自动构建）
 ```
@@ -167,8 +195,16 @@ MULTI_DOMAIN_MAX_DOMAINS=3
 | `DOMAIN_PRIORITY_ORDER` | `刑事,行政,治安,监察` | 领域优先级顺序 |
 | `ENABLE_INTELLIGENT_EXPANSION` | `false` | 上下文智能拓展（LLM 判断相关性） |
 | `EXPANSION_DEPTH` | `1` | 拓展深度：0=关 / 1=标准 / 2=深度 |
-| `ENABLE_SEMANTIC_VERIFICATION` | `true` | 引用语义溯源（置信度标注 + 遗漏检测） |
+| `ENABLE_SEMANTIC_VERIFICATION` | `false` | 引用语义溯源（置信度标注 + 遗漏检测） |
+| `APP_DB_PATH` | `./data/db/app.sqlite3` | 本地运行时 SQLite：会话、反馈、语义缓存 |
+| `INTERPRETATION_DB_PATH` | `./data/db/interpretations.sqlite3` | 司法解释独立检索库路径 |
 | `ENABLE_CASE_RETRIEVAL` | `true` | 案例检索（概览/示例类问题自动跳过） |
+| `USE_OFFICIAL_CASES` | `true` | 使用官方精选案例库（人工整理，小规模默认启用） |
+| `USE_LEGACY_CASES` | `false` | 使用旧 LeCaRD / CaseMatch 历史案例库 |
+| `OFFICIAL_CASE_RAW_DIR` | `./data/official_cases/raw` | 官方案例原始 JSON/TXT/JSONL 目录 |
+| `OFFICIAL_CASE_PROCESSED_FILE` | `./data/official_cases/processed/official_cases.jsonl` | 官方案例清洗后 JSONL |
+| `OFFICIAL_CASE_TOP_K` | `3` | 官方精选案例返回条数 |
+| `LEGACY_CASE_TOP_K` | `0` | 历史类案返回条数（默认不检索） |
 | `CASE_DB_PATH` | `./data/CaseMatch/cases.sqlite3` | 案例数据库路径 |
 | `CASE_TOP_K` | `3` | 案例检索返回条数 |
 | `CASE_USE_SEMANTIC` | `true` | 案例语义检索（LanceDB + Embedding） |
@@ -186,35 +222,50 @@ MULTI_DOMAIN_MAX_DOMAINS=3
 
 </details>
 
-### 启动后端
+### 一键启动（推荐）
 
 ```bash
-python run.py
+# Linux / macOS
+chmod +x start.sh && ./start.sh
+
+# Windows
+start.bat
 ```
 
-首次运行：加载文档 → 分割 → 构建条号索引 → Embedding → 构建向量库。后续启动直接加载缓存（data/ 目录文件变化时自动重建）。
+脚本自动检查 Python 环境、`.env` 配置、安装依赖，同时启动后端和前端。
 
-服务地址: `http://localhost:8080` | API 文档: `http://localhost:8080/docs`
-
-### 启动前端
+### 手动启动
 
 ```bash
+# 后端
+python run.py
+
+# 前端（另一个终端）
 cd frontend
 pnpm install
 pnpm run dev
 ```
 
-浏览器打开 `http://localhost:5173`。
+首次运行：加载文档 → 分割 → 构建条号索引 → Embedding → 构建向量库。后续启动直接加载缓存（data/ 目录文件变化时自动重建）。
+
+服务地址: `http://localhost:9000` | API 文档: `http://localhost:9000/docs` | 前端: `http://localhost:5173`
 
 ## API 接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/api/chat` | 法律咨询（非流式）→ `answer`, `sources`, `domain`, `risk_warning`, `case_results` |
-| POST | `/api/chat/stream` | 法律咨询（流式 SSE）→ 逐 token 返回 + `meta`/`substep`/`done` 事件 |
+| POST | `/api/chat/stream` | 法律咨询（流式 SSE）→ 逐 token 返回 + `meta`/`substep`/`done` 事件，支持 4 种意图（qa/analysis/statute/document） |
+| POST | `/api/document` | 劳动人事争议仲裁申请书生成（流式 SSE）→ 字段抽取、缺失检查、表格模板生成 |
+| POST | `/api/feedback` | 提交用户反馈（有用/没用） |
+| GET | `/api/feedback/stats` | 反馈统计（总体 + 按领域分组） |
+| GET | `/api/feedback/reviews` | 差评记录列表（供人工审核） |
+| PUT | `/api/feedback/{id}/answer` | 修正回答内容（人工审核后） |
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/domains` | 法律领域配置（名称 + 颜色） |
 | GET | `/api/laws` | 所有领域列表（含法律名称和关键词） |
+| GET | `/api/config` | 获取可热更新配置参数（需 ADMIN_API_KEY） |
+| PUT | `/api/config` | 运行时更新配置参数（白名单字段，需 ADMIN_API_KEY） |
 | GET | `/api/sessions` | 会话列表 |
 | GET | `/api/sessions/{id}` | 会话详情（全部对话） |
 | GET | `/api/sessions/{id}/export` | 导出会话为 Markdown 文件 |
@@ -281,25 +332,28 @@ LLM 生成回答后，验证引用法条的可信度。支持两种模式：
 
 ### 案例检索
 
-基于 CaseMatch 刑事裁判文书数据集（9000+ 条），作为法条检索的补充参考。
+项目采用“双案例库”策略，法律法规和司法解释仍是主依据，案例只作为类案参考。
 
-- **FTS5 全文检索**：jieba 分词 + SQLite FTS5 关键词匹配
-- **LanceDB 语义检索**：Embedding 向量相似度搜索
-- **RRF 融合**：两种结果通过 Reciprocal Rank Fusion 合并
-- **领域过滤**：按当前查询领域自动过滤不相关案例（如劳动问题不返回刑事案例）
-- **概览跳过**：宽泛的法律概览/示例类问题自动跳过案例检索
+1. **官方精选案例库**：人工整理最高人民法院指导性案例、人民法院案例库参考案例等公开权威案例，覆盖刑事、民事、行政、执行、国家赔偿五个大类，每类约 10 条。当前版本默认启用，用于法律咨询和案情分析中的类案参考。
+2. **LeCaRD / CaseMatch 历史案例库**：来源于公开类案检索数据集和相关研究项目，数据量较大、时间较早，主要用于检索实验。由于体积和时效性原因，当前版本默认关闭，不随主流程启用。
 
-案例以「相似案例参考」卡片展示（含罪名、案例摘要、法院说理、争议焦点）。
-
-首次使用需下载案例库：
+官方精选案例通过本地人工 JSON 导入，不包含官方案例平台爬虫，不批量请求官网接口：
 
 ```bash
-# 方式一：从 HuggingFace 镜像下载
-python scripts/download_cases.py
+python scripts/import_official_cases.py
+```
 
-# 方式二：手动下载
+导入脚本会读取 `data/official_cases/raw/刑事`、`民事`、`行政`、`执行`、`国家赔偿` 下的 `.txt/.json/.jsonl` 文件，兼容旧 `data/指导性案例/` 目录，并输出 `data/official_cases/processed/official_cases.jsonl`。检索结果在前端以「官方精选案例」展示案例标题、案例级别、分类、关键词、裁判日期、案号、裁判要点和来源。
+
+官方精选案例库采用强相关过滤机制。系统不会仅因案例属于同一大类就强行展示，而是会结合用户问题领域、案例关键词、裁判要点和案情文本进行二次过滤。对于多领域问题，系统会识别主领域与辅助领域，并基于核心事实关键词过滤参考案例。若官方精选案例库中暂无高度相关案例，系统不会为了凑满 topK 展示低相关案例，避免将环保、知识产权等无关案例错误展示给婚姻家庭、家暴、人身安全保护令等问题。
+
+参考案例检索不只按刑事、民事、行政等大类过滤，还会结合用户问题中的核心事实关键词、罪名、法律关系、主体身份和损害结果进行二次过滤。系统不会因为案例同属刑事大类，就将危险驾驶、正当防卫等与用户问题无关的案例强行展示。
+
+旧历史案例库仍可手动下载并显式启用：
+
+```bash
+python scripts/download_cases.py
 hf download --repo-type dataset Yuel-P/CaseMatch-Agent-data --local-dir data/CaseMatch
-# 镜像站：设置 HF_ENDPOINT=https://hf-mirror.com
 ```
 
 ### 语义缓存
@@ -320,6 +374,99 @@ hf download --repo-type dataset Yuel-P/CaseMatch-Agent-data --local-dir data/Cas
 | `SEMANTIC_CACHE_TTL` | `72` | 缓存有效期（小时） |
 | `SEMANTIC_CACHE_MAX_ITEMS` | `1000` | 最大缓存条目数 |
 
+### 意图分类系统
+
+用户消息自动识别为 4 种意图，路由到不同处理路径：
+
+| 意图 | 触发方式 | 处理路径 |
+|------|----------|----------|
+| `qa` | 通用法律问题 | RAG 检索 → LLM 回答 |
+| `analysis` | "帮我分析案情"、"怎么维权" | LangGraph 多步推理 → 结构化分析报告 |
+| `statute` | "诉讼时效"、"来得及吗" | LLM 提取时间 + 规则计算 → 时效结论 |
+| `document` | "写劳动仲裁申请书"、"起草申请书" | 字段抽取 + 缺失检查 + 模板生成 |
+
+分类采用关键词快速匹配（0ms），高置信度直接返回，低置信度走 LLM 兜底。
+
+### 智能案情分析
+
+自动检测案情分析意图后，启动 LangGraph 多步推理图：
+
+```
+案情描述 → 案情拆解（LLM 提取关键事实）
+  ──── 并行检索 ────
+  ├── 法律关系检索
+  ├── 证据检索
+  └── 维权路径检索
+  → 交叉分析（综合研判）→ 结构化报告
+```
+
+输出固定 Markdown 结构，前端可按标题分块展示：
+
+```markdown
+### 🧾 案情摘要
+### 🏷️ 涉及法律关系
+### 🎯 争议焦点
+### ✅ 有利事实
+### ⚠️ 不利事实与风险
+### 📌 证据清单
+### 🛠️ 处理路径
+### 📝 下一步建议
+### ❓ 需要补充的信息
+### 📜 免责声明
+```
+
+报告中自动嵌入时效计算结果（如适用）。分析完成后保存 `case_analysis_id`，前端显示「案情分析」标签 + 「生成劳动仲裁申请书」按钮。
+
+### 诉讼时效计算器
+
+两种使用方式：
+
+1. **集成模式** — 案情分析报告自动计算相关时效
+2. **独立问答** — 用户直接提问"还来得及吗"、"仲裁时效怎么算"
+
+支持 5 种时效类型：
+
+| 类型 | 时效 | 法律依据 |
+|------|------|----------|
+| 劳动仲裁 | 1 年 | 劳动争议调解仲裁法第 27 条 |
+| 普通民事 | 3 年 | 民法典第 188 条 |
+| 人身损害 | 3 年 | 民法典第 188 条 |
+| 产品质量 | 2 年 | 产品质量法第 45 条 |
+| 环境污染 | 3 年 | 环境保护法第 66 条 |
+
+流程：LLM 从案情中提取时间节点 → 规则引擎计算截止日期 → 输出"还在时效内"/"已过期"结论 + 剩余天数。
+
+### 劳动人事争议仲裁申请书生成
+
+两种触发方式：
+
+1. **案情分析后** — 分析报告下方「生成劳动仲裁申请书」按钮，自动携带案情上下文和 `case_analysis_id`
+2. **独立问答** — 用户直接说"帮我写一份劳动仲裁申请书"
+
+当前演示闭环只启用 `labor_arbitration_application`。流程为：
+
+```text
+案情分析结果 / 用户输入案情
+  → 抽取申请人信息、被申请人信息、入离职时间、岗位、合同、工资、考勤、社保等字段
+  → 检查关键字段缺失
+  → 用户补充字段
+  → 按《劳动人事争议仲裁申请书》表格结构生成 Markdown 预览
+```
+
+关键字段缺失时返回 `missing_fields`，不会编造姓名、公司、日期、工资等事实；非关键字段以“待补充”标记。生成结果包含标题、致送仲裁委员会、申请人信息、被申请人信息、仲裁请求、计算公式、基本事实和理由、免责声明、申请人签名和提交日期。
+
+### 用户反馈 + 反馈管理
+
+**用户侧：**
+- 每条 AI 回答下方显示 👍/👎 按钮
+- 反馈即时写入数据库，UI 显示"感谢反馈"
+
+**管理侧（侧边栏「反馈管理」入口）：**
+- 统计面板：反馈总数、好评数、差评数、好评率
+- 按领域分组统计：定位哪些领域回答质量差
+- 差评审核列表：查看所有差评记录的问题和回答
+- 回答修正：直接编辑修正差评的回答内容
+
 ### 日志系统
 
 统一使用 Python logging 模块，通过 `LOG_LEVEL` 环境变量控制级别：
@@ -336,14 +483,54 @@ hf download --repo-type dataset Yuel-P/CaseMatch-Agent-data --local-dir data/Cas
 - **示例问题**：8 条覆盖刑事、劳动、婚姻、交通等领域的示例
 - **法条链接**：法律名称可点击跳转国家法律法规数据库（flk.npc.gov.cn）
 - **案例卡片**：刑事类问题展示相似案例（可展开查看法院说理和争议焦点）
+- **意图标签**：消息气泡显示「案情分析」「法律文书」等意图标签
+- **文书生成**：案情分析后显示「生成文书」下拉按钮（4 种文书可选）
+- **用户反馈**：每条回答下方 👍/👎 按钮，即时反馈
+- **反馈管理**：侧边栏入口，统计面板 + 差评审核 + 回答修正
 - **会话导出**：侧边栏会话 hover 显示下载按钮，导出 Markdown 文件
 - **缓存标识**：语义缓存命中时回答底部显示闪电图标「来自缓存」
 - **健康检查**：前端启动时检测后端状态，未就绪时提示等待
 - **SSE 重试**：流式连接中断自动重试（指数退避），无内容才报错
+- **流式进度条**：pipeline 各阶段实时显示耗时（分类→检索→精排→扩展→生成）
+- **状态持久化**：会话和消息自动保存到 localStorage，刷新不丢失
+
+## 性能优化
+
+### 并行缓存查询
+
+缓存查找与 RAG 链并行执行。缓存设置 1s 超时：命中时直接返回（取消 RAG 任务），未命中时不阻塞（RAG 已在后台运行）。
+
+### 查询复杂度路由
+
+自动判断查询复杂度，简单查询跳过昂贵步骤：
+
+| 查询类型 | 判断条件 | 优化策略 |
+| --- | --- | --- |
+| 简单查询 | ≤15 字 + 无复杂关键词 | 跳过 Rerank 精排 + 案例检索 |
+| 复杂查询 | 含"区别""分析""时效"等关键词 | 完整 7 步流水线 |
+
+示例：「试用期最长多久？」→ 简单模式，响应更快；「劳动仲裁和工伤认定有什么区别？」→ 完整流程。
+
+### 流式降级
+
+流式接口完全无内容时自动降级为非流式请求，避免用户看到空白或卡住。前端已有指数退避重试（最多 3 次），配合后端降级形成双保险。
+
+### 线程安全
+
+- **语义缓存**：SQLite 写操作加 `threading.Lock`，防止并发写入数据损坏
+- **会话存储**：LRU 淘汰 + DB 恢复，统一由 `app/core.py` 管理
+- **向量库构建**：临时目录构建成功后再原子替换，构建失败不丢数据
+
+### 安全加固
+
+- 管理端点（`/api/config`、`/api/metrics`）需 `ADMIN_API_KEY` 鉴权
+- 输入清洗：HTML 标签剥离 + prompt 注入检测
+- 错误处理：API 响应不泄露内部异常信息（文件路径、SQL 错误等）
+- 速率限制：可配置窗口内最大请求数
 
 ## 知识库
 
-`data/` 目录存放法律全文和司法解释（.docx），支持递归扫描子目录。
+`data/` 目录存放法律全文和司法解释（.docx）。主向量库默认排除 `data/司法解释/`、`data/指导性案例/` 等重目录，避免启动时全量读取；司法解释通过 `data/db/interpretations.sqlite3` 独立检索库按需查询。
 
 数据来源：[国家法律法规数据库](https://flk.npc.gov.cn)
 
@@ -368,7 +555,7 @@ hf download --repo-type dataset Yuel-P/CaseMatch-Agent-data --local-dir data/Cas
 
 ### 补充司法解释
 
-将 `.docx` 文件放入 `data/司法解释/`，无需修改注册表，重启服务即可。
+将 `.docx` 文件放入 `data/司法解释/` 后，运行 `scripts/build_interpretation_db.py` 重建独立检索库；服务启动时只打开该库，不会把司法解释全文全量加载进主向量库。
 
 ### 爬取司法解释
 

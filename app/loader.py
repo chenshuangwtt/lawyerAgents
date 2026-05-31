@@ -467,12 +467,49 @@ def _generate_summary(chunk: Document) -> str:
 
 # ================== 对外公开接口 ==================
 
-def load_documents(data_dir: str, parallel: bool = True) -> List[Document]:
+def _normalize_exclude_dirs(exclude_dirs: Optional[List[str] | str]) -> set[str]:
+    """标准化需要排除的目录名列表。"""
+    if not exclude_dirs:
+        return set()
+    if isinstance(exclude_dirs, str):
+        items = exclude_dirs.split(",")
+    else:
+        items = exclude_dirs
+    return {str(item).strip().strip("/\\") for item in items if str(item).strip()}
+
+
+def _is_excluded_path(path: Path, root: Path, exclude_dirs: set[str]) -> bool:
+    """判断 path 是否位于排除目录下。"""
+    if not exclude_dirs:
+        return False
+    try:
+        parts = path.relative_to(root).parts[:-1]
+    except ValueError:
+        parts = path.parts[:-1]
+    return any(part in exclude_dirs for part in parts)
+
+
+def _discover_docx_files(data_dir: str, exclude_dirs: Optional[List[str] | str] = None) -> List[Path]:
+    """发现参与主法律文书索引的 docx 文件，不读取正文。"""
+    data_path = Path(data_dir)
+    excluded = _normalize_exclude_dirs(exclude_dirs)
+    return [
+        f for f in sorted(data_path.rglob("*.docx"))
+        if not _is_excluded_path(f, data_path, excluded)
+    ]
+
+
+def load_documents(
+    data_dir: str,
+    parallel: bool = True,
+    exclude_dirs: Optional[List[str] | str] = None,
+) -> List[Document]:
     """
-    加载 data 目录下所有 .docx 文件为 Document 列表。
+    加载 data 目录下参与主法条库的 .docx 文件为 Document 列表。
     Args:
         data_dir: 存放 .docx 文件的目录
         parallel: 是否并行加载（默认 True）
+        exclude_dirs: 需要跳过的 data 子目录名或逗号分隔字符串
     Returns:
         List[Document]: 每个 Document 的 page_content 为原始文档全文，
                         metadata 中包含 source（法律名称）和 file_path。
@@ -481,7 +518,7 @@ def load_documents(data_dir: str, parallel: bool = True) -> List[Document]:
     if not data_path.exists():
         raise FileNotFoundError(f"数据目录不存在: {data_dir}")
 
-    docx_files = sorted(data_path.rglob("*.docx"))
+    docx_files = _discover_docx_files(data_dir, exclude_dirs)
     if not docx_files:
         raise FileNotFoundError(f"未找到 .docx 文件: {data_dir}")
 
@@ -505,6 +542,9 @@ def load_documents(data_dir: str, parallel: bool = True) -> List[Document]:
         for fp in docx_files:
             all_docs.extend(load_one(fp))
 
+    excluded = _normalize_exclude_dirs(exclude_dirs)
+    if excluded:
+        logger.info("已排除 data 子目录：%s", sorted(excluded))
     logger.info("加载完成：%d 个文件，共 %d 个原始文档块", len(docx_files), len(all_docs))
     return all_docs
 

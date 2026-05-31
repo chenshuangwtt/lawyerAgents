@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "lawyer-agents"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "基于中国法律文书的 RAG 智能法律咨询系统"
+license = {text = "MIT"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/run.py"]
+
+[tool.coverage.report]
+fail_under = 40
+show_missing = true

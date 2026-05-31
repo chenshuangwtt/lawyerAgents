@@ -12,6 +12,18 @@ import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+from app.chat_history_schema import (
+    init_pg_schema,
+    init_sqlite_schema,
+    migrate_legacy_sqlite,
+)
+from app.storage_paths import (
+    DATA_DB_DIR,
+    DEFAULT_APP_DB_PATH,
+    LEGACY_CHAT_HISTORY_DB_PATH,
+    get_app_db_path,
+)
+
 
 # --- 后端检测 ---
 
@@ -21,8 +33,8 @@ USE_PG = DATABASE_URL.startswith("postgresql")
 _lock = threading.RLock()
 
 # SQLite 状态
-_DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "db")
-DB_PATH = os.path.join(_DB_DIR, "chat_history.db")
+_DB_DIR = os.path.dirname(get_app_db_path()) or str(DATA_DB_DIR)
+DB_PATH = get_app_db_path()
 _sqlite_conn = None
 
 # PostgreSQL 状态
@@ -42,7 +54,13 @@ def _get_sqlite_conn():
                 _sqlite_conn.row_factory = sqlite3.Row
                 _sqlite_conn.execute("PRAGMA journal_mode=WAL")
                 _sqlite_conn.execute("PRAGMA busy_timeout=5000")
-                _init_sqlite(_sqlite_conn)
+                init_sqlite_schema(_sqlite_conn)
+                migrate_legacy_sqlite(
+                    _sqlite_conn,
+                    db_path=DB_PATH,
+                    default_app_db_path=str(DEFAULT_APP_DB_PATH),
+                    legacy_chat_history_db_path=str(LEGACY_CHAT_HISTORY_DB_PATH),
+                )
     return _sqlite_conn
 
 
@@ -58,7 +76,7 @@ def _get_pg_conn():
                 )
                 conn = _pg_pool.getconn()
                 try:
-                    _init_pg(conn)
+                    init_pg_schema(conn)
                     conn.commit()
                 finally:
                     _pg_pool.putconn(conn)
@@ -82,61 +100,6 @@ def _get_conn():
 def init_db():
     """初始化数据库（兼容 run.py 调用）。"""
     _get_conn()
-
-
-# --- Schema 初始化 ---
-
-def _init_sqlite(conn):
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL DEFAULT 'default',
-            question TEXT NOT NULL,
-            answer TEXT NOT NULL,
-            sources TEXT NOT NULL DEFAULT '[]',
-            domain TEXT NOT NULL DEFAULT '',
-            case_state TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(chat_history)").fetchall()]
-    if "session_id" not in cols:
-        conn.execute("ALTER TABLE chat_history ADD COLUMN session_id TEXT NOT NULL DEFAULT 'default'")
-    if "domain" not in cols:
-        conn.execute("ALTER TABLE chat_history ADD COLUMN domain TEXT NOT NULL DEFAULT ''")
-    if "case_state" not in cols:
-        conn.execute("ALTER TABLE chat_history ADD COLUMN case_state TEXT")
-    if "feedback" not in cols:
-        conn.execute("ALTER TABLE chat_history ADD COLUMN feedback INTEGER")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS session_meta (
-            session_id TEXT PRIMARY KEY,
-            pinned INTEGER NOT NULL DEFAULT 0
-        )
-    """)
-    conn.commit()
-
-
-def _init_pg(conn):
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS chat_history (
-            id SERIAL PRIMARY KEY,
-            session_id TEXT NOT NULL DEFAULT 'default',
-            question TEXT NOT NULL,
-            answer TEXT NOT NULL,
-            sources TEXT NOT NULL DEFAULT '[]',
-            domain TEXT NOT NULL DEFAULT '',
-            case_state TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS session_meta (
-            session_id TEXT PRIMARY KEY,
-            pinned INTEGER NOT NULL DEFAULT 0
-        )
-    """)
 
 
 # --- 查询适配层 ---
@@ -430,6 +393,138 @@ def save_feedback(record_id: int, feedback: int) -> bool:
             cursor = conn.execute(
                 "UPDATE chat_history SET feedback = ? WHERE id = ?",
                 (feedback, record_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+
+def get_feedback_stats() -> Dict[str, Any]:
+    """
+    获取反馈统计数据。
+
+    Returns:
+        {
+            "total": int,           # 有反馈的记录总数
+            "positive": int,        # 好评数
+            "negative": int,        # 差评数
+            "rate": float,          # 好评率 (0-1)
+            "by_domain": [...],     # 按领域分组统计
+        }
+    """
+    with _lock:
+        if USE_PG:
+            conn = _get_pg_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE feedback = 1) as positive,
+                        COUNT(*) FILTER (WHERE feedback = -1) as negative
+                    FROM chat_history WHERE feedback IS NOT NULL
+                """)
+                row = cur.fetchone()
+                total, positive, negative = row["total"], row["positive"], row["negative"]
+
+                cur.execute("""
+                    SELECT domain,
+                           COUNT(*) as total,
+                           COUNT(*) FILTER (WHERE feedback = 1) as positive,
+                           COUNT(*) FILTER (WHERE feedback = -1) as negative
+                    FROM chat_history WHERE feedback IS NOT NULL
+                    GROUP BY domain ORDER BY negative DESC
+                """)
+                by_domain = [dict(r) for r in cur.fetchall()]
+            finally:
+                _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            row = conn.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    COALESCE(SUM(CASE WHEN feedback = 1 THEN 1 ELSE 0 END), 0) as positive,
+                    COALESCE(SUM(CASE WHEN feedback = -1 THEN 1 ELSE 0 END), 0) as negative
+                FROM chat_history WHERE feedback IS NOT NULL
+            """).fetchone()
+            total, positive, negative = row["total"], row["positive"], row["negative"]
+
+            rows = conn.execute("""
+                SELECT domain,
+                       COUNT(*) as total,
+                       COALESCE(SUM(CASE WHEN feedback = 1 THEN 1 ELSE 0 END), 0) as positive,
+                       COALESCE(SUM(CASE WHEN feedback = -1 THEN 1 ELSE 0 END), 0) as negative
+                FROM chat_history WHERE feedback IS NOT NULL
+                GROUP BY domain ORDER BY negative DESC
+            """).fetchall()
+            by_domain = [dict(r) for r in rows]
+
+    rate = positive / total if total > 0 else 0
+    return {
+        "total": total,
+        "positive": positive,
+        "negative": negative,
+        "rate": round(rate, 4),
+        "by_domain": by_domain,
+    }
+
+
+def get_negative_reviews(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    """
+    获取差评记录列表（feedback = -1），供人工审核。
+
+    Returns:
+        [{id, session_id, question, answer, domain, created_at}, ...]
+    """
+    with _lock:
+        if USE_PG:
+            conn = _get_pg_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, session_id, question, answer, domain, created_at FROM chat_history WHERE feedback = -1 ORDER BY id DESC LIMIT %s OFFSET %s",
+                    (limit, offset),
+                )
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            rows = conn.execute(
+                "SELECT id, session_id, question, answer, domain, created_at FROM chat_history WHERE feedback = -1 ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+
+def update_answer(record_id: int, new_answer: str) -> bool:
+    """
+    修正记录的回答内容（人工审核后修正）。
+
+    Args:
+        record_id: 记录 ID
+        new_answer: 修正后的回答
+
+    Returns:
+        是否更新成功
+    """
+    with _lock:
+        if USE_PG:
+            conn = _get_pg_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE chat_history SET answer = %s WHERE id = %s",
+                    (new_answer, record_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            cursor = conn.execute(
+                "UPDATE chat_history SET answer = ? WHERE id = ?",
+                (new_answer, record_id),
             )
             conn.commit()
             return cursor.rowcount > 0

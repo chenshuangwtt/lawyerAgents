@@ -1,17 +1,53 @@
 <script setup>
-import { ref, reactive, provide, onMounted } from 'vue'
+import { ref, reactive, provide, onMounted, watch } from 'vue'
 import { getSessionDetail, getDomains, checkHealth } from './api.js'
 import Sidebar from './components/Sidebar.vue'
 import ChatPanel from './components/ChatPanel.vue'
+import FeedbackAdmin from './components/FeedbackAdmin.vue'
 
-const sessionId = ref(crypto.randomUUID())
-const messages = ref([])
-const sessionCache = reactive(new Map())
+const STORAGE_KEY = 'lawyer-agents-state'
+const STORAGE_MAX_AGE = 7 * 24 * 60 * 60 * 1000 // 7 days
+
+function loadPersistedState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const data = JSON.parse(raw)
+    if (Date.now() - (data._ts || 0) > STORAGE_MAX_AGE) {
+      localStorage.removeItem(STORAGE_KEY)
+      return null
+    }
+    return data
+  } catch { return null }
+}
+
+const persisted = loadPersistedState()
+
+const sessionId = ref(persisted?.sessionId || crypto.randomUUID())
+const messages = ref(persisted?.messages || [])
+const sessionCache = reactive(new Map(persisted?.sessionCache || []))
 const sidebarOpen = ref(false)
 const sidebarRef = ref(null)
 const backendReady = ref(false)
 const backendError = ref('')
 const sessionLoading = ref(false)
+const view = ref('chat') // 'chat' | 'admin'
+
+// 持久化到 localStorage
+function persistState() {
+  try {
+    const data = {
+      sessionId: sessionId.value,
+      messages: messages.value,
+      sessionCache: [...sessionCache.entries()],
+      _ts: Date.now(),
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+  } catch { /* quota exceeded, ignore */ }
+}
+
+watch([sessionId, messages], persistState, { deep: true })
+watch(() => [...sessionCache.entries()], persistState, { deep: true })
 
 // 从后端加载领域颜色配置，provide 给子组件
 const domainColors = reactive({})
@@ -88,6 +124,11 @@ async function selectSession(id) {
 function onMessageSent() {
   sidebarRef.value?.refresh()
 }
+
+function switchView(v) {
+  view.value = v
+  sidebarOpen.value = false
+}
 </script>
 
 <template>
@@ -117,6 +158,7 @@ function onMessageSent() {
       <Sidebar
         ref="sidebarRef"
         :session-id="sessionId"
+        :view="view"
         :class="[
           'fixed lg:static inset-y-0 left-0 z-20 w-64 transition-transform',
           sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
@@ -124,10 +166,13 @@ function onMessageSent() {
         @new-session="newSession"
         @select-session="selectSession"
         @close="sidebarOpen = false"
+        @switch-view="switchView"
       />
 
       <!-- 右侧主区域 -->
+      <FeedbackAdmin v-if="view === 'admin'" @toggle-sidebar="sidebarOpen = !sidebarOpen" />
       <ChatPanel
+        v-else
         :session-id="sessionId"
         :messages="messages"
         :session-loading="sessionLoading"

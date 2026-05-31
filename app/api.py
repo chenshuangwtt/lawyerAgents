@@ -14,11 +14,13 @@ import json
 import asyncio
 import logging
 import os
+import hmac
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel, Field
@@ -26,9 +28,15 @@ from pydantic import BaseModel, Field
 from app.chat_history import (
     save_record, get_sessions, get_session_records,
     toggle_pin, delete_session as db_delete, save_feedback,
+    get_feedback_stats, get_negative_reviews, update_answer,
 )
 from app.law_registry import load_domain_colors, load_registry
 from app.rag_chain import ask, ask_stream
+from app.core import RISK_WARNING
+from app.sanitizer import sanitize_input, sanitize_input_enriched
+from app.middleware import RateLimitMiddleware, APIKeyMiddleware, MetricsMiddleware, metrics
+from app.service_context import AppContext
+from app.sse import sse_event_stream
 
 logger = logging.getLogger(__name__)
 
@@ -108,10 +116,28 @@ class SessionDetailResponse(BaseModel):
 
 # --- 应用初始化 ---
 
+@asynccontextmanager
+async def lifespan(app):
+    """启动时检查生产环境配置，输出警告。"""
+    from app.config import settings
+    warnings = []
+    if not settings.chat_api_key:
+        warnings.append("CHAT_API_KEY 未设置，聊天接口无鉴权")
+    if os.getenv("CORS_ORIGINS", "*") == "*":
+        warnings.append("CORS_ORIGINS=*（允许所有来源），生产环境建议限制")
+    if not settings.admin_api_key:
+        warnings.append("ADMIN_API_KEY 未设置，配置修改接口无鉴权")
+    if warnings:
+        for w in warnings:
+            logger.warning("[启动] %s", w)
+    yield
+
+
 app = FastAPI(
     title="法律顾问 Agent",
     description="基于中国法律文书的 RAG 智能法律咨询系统",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # 允许跨域访问
@@ -123,6 +149,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 速率限制 + API Key 鉴权
+from app.config import settings as _settings
+app.add_middleware(
+    RateLimitMiddleware,
+    max_requests=_settings.rate_limit_requests,
+    window_seconds=_settings.rate_limit_window,
+    use_runtime_settings=True,
+)
+app.add_middleware(APIKeyMiddleware, api_key=_settings.chat_api_key)
+app.add_middleware(MetricsMiddleware)
+
 # RAG 链引用，由 run.py 注入
 rag_chain = None
 retriever = None
@@ -130,6 +167,83 @@ llm = None
 rag_components = None
 semantic_cache = None
 analysis_graph = None
+_app_context_override: AppContext | None = None
+
+
+# FastAPI app 实例
+
+
+def set_app_context(context: AppContext | None) -> None:
+    """Set an optional service container for tests or alternate bootstraps."""
+    global _app_context_override
+    _app_context_override = context
+
+
+def get_app_context() -> AppContext:
+    """Return injected context, falling back to legacy module globals."""
+    if _app_context_override is not None:
+        return _app_context_override
+    return AppContext(
+        rag_chain=rag_chain,
+        retriever=retriever,
+        llm=llm,
+        rag_components=rag_components,
+        semantic_cache=semantic_cache,
+        analysis_graph=analysis_graph,
+    )
+
+
+def _is_secure_request(request: Request) -> bool:
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+    return request.url.scheme == "https" or forwarded_proto.lower() == "https"
+
+
+def _require_admin(request: Request, x_api_key: str) -> None:
+    """Validate admin API access without leaking keys or using timing-prone compare."""
+    from app.config import settings
+
+    if settings.app_env == "production" and not settings.allow_insecure_local and not _is_secure_request(request):
+        raise HTTPException(status_code=403, detail="Admin API requires HTTPS in production")
+    if not settings.admin_api_key:
+        raise HTTPException(status_code=403, detail="无效的 API Key")
+    if not hmac.compare_digest(str(x_api_key or ""), str(settings.admin_api_key)):
+        raise HTTPException(status_code=403, detail="无效的 API Key")
+
+
+def _schedule_semantic_cache_store(
+    question: str,
+    answer_text: str,
+    sources: list,
+    domain: str,
+    case_results: list,
+    cache=None,
+) -> None:
+    """后台写入语义缓存，避免阻塞 SSE done 事件。"""
+    cache = semantic_cache if cache is None else cache
+    if not cache:
+        return
+
+    async def _store():
+        try:
+            await asyncio.to_thread(
+                cache.store,
+                question,
+                answer_text,
+                sources,
+                domain,
+                case_results,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[语义缓存] 后台写入异常: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning("[语义缓存] 无可用事件循环，跳过后台写入")
+        return
+    loop.create_task(_store())
 
 
 # --- SSE 工具函数 ---
@@ -142,59 +256,19 @@ async def _sse_generator(stream, save_fn=None):
         stream: 异步生成器，yield dict 事件（type: meta/substep/token/done/error）
         save_fn: 可选的保存函数，在 done 事件时调用 save_fn(event) -> record_id
     """
-    answer_text = ""
+    from app.config import settings
+
+    event_stream = sse_event_stream(
+        stream,
+        save_fn=save_fn,
+        keepalive_seconds=settings.sse_keepalive_seconds,
+        logger=logger,
+    )
     try:
-        while True:
-            try:
-                event = await asyncio.wait_for(stream.__anext__(), timeout=15)
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
-                yield ":keepalive\n\n"
-                continue
-
-            event_type = event["type"]
-
-            if event_type == "meta":
-                meta_data = {"domain": event.get("domain", "综合")}
-                if "domains" in event:
-                    meta_data["domains"] = event["domains"]
-                    meta_data["multi_domain"] = event.get("multi_domain", False)
-                if "intent" in event:
-                    meta_data["intent"] = event["intent"]
-                yield f"event: meta\ndata: {json.dumps(meta_data, ensure_ascii=False)}\n\n"
-
-            elif event_type == "substep":
-                yield f"event: substep\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-
-            elif event_type == "token":
-                answer_text += event["content"]
-                yield f"event: token\ndata: {json.dumps({'content': event['content']}, ensure_ascii=False)}\n\n"
-
-            elif event_type == "done":
-                done_data = {
-                    "sources": event.get("sources", []),
-                    "risk_warning": event.get("risk_warning", ""),
-                }
-                if "domain" in event:
-                    done_data["domain"] = event["domain"]
-                if "multi_domain" in event:
-                    done_data["multi_domain"] = event["multi_domain"]
-                if "case_results" in event:
-                    done_data["case_results"] = event["case_results"]
-                if "case_state" in event:
-                    done_data["case_state"] = event["case_state"]
-                if save_fn:
-                    record_id = save_fn(event, answer_text)
-                    if record_id:
-                        done_data["record_id"] = record_id
-                yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
-
-            elif event_type == "error":
-                yield f"event: error\ndata: {json.dumps({'message': event['message']}, ensure_ascii=False)}\n\n"
-    except Exception as e:
-        logger.error("[SSE] 事件生成异常: %s", e)
-        yield f"event: error\ndata: {json.dumps({'message': str(e)}, ensure_ascii=False)}\n\n"
+        async for chunk in event_stream:
+            yield chunk
+    finally:
+        await event_stream.aclose()
 
 
 # --- 路由 ---
@@ -224,31 +298,62 @@ async def get_laws():
 
 @app.get("/api/health", response_model=HealthResponse)
 async def health_check():
-    """健康检查接口。"""
-    if rag_chain is None:
+    """健康检查接口，验证核心组件可用性。"""
+    ctx = get_app_context()
+    if ctx.rag_chain is None:
         return HealthResponse(
             status="initializing",
             message="服务正在初始化，RAG 链尚未就绪",
         )
+
+    # 轻量级数据库连通性检查
+    try:
+        from app.chat_history import _get_sqlite_conn, USE_PG
+        if USE_PG:
+            from app.chat_history import _get_pg_conn, _put_pg_conn
+            conn = _get_pg_conn()
+            try:
+                conn.cursor().execute("SELECT 1")
+            finally:
+                _put_pg_conn(conn)
+        else:
+            conn = _get_sqlite_conn()
+            conn.execute("SELECT 1")
+    except Exception as e:
+        return HealthResponse(status="degraded", message=f"数据库连接异常: {e}")
+
     return HealthResponse(status="ok", message="法律顾问服务运行正常")
 
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """法律咨询接口：提交问题，获取法律建议并自动保存记录。"""
-    if rag_chain is None or retriever is None or llm is None:
+    """法律咨询接口：提交问题，获取法律建议并自动保存记录。
+
+    优化：缓存查找与 RAG 链并行执行，缓存命中时取消 RAG 任务直接返回。
+    """
+    sanitization = sanitize_input_enriched(request.question)
+    if not sanitization.allowed:
+        raise HTTPException(status_code=400, detail="输入包含不允许的内容")
+    request.question = sanitization.sanitized_text or ""
+    ctx = get_app_context()
+    if ctx.rag_chain is None or ctx.retriever is None or ctx.llm is None:
         raise HTTPException(
             status_code=503,
             detail="RAG 链尚未初始化，请等待服务就绪后重试",
         )
 
-    # 语义缓存命中 → 直接返回
-    if semantic_cache:
+    # 先查缓存，命中则直接返回（避免启动不必要的 RAG 任务）
+    if ctx.semantic_cache:
         try:
-            cached = semantic_cache.lookup(request.question)
-        except Exception as e:
-            logger.warning("[语义缓存] 查找异常: %s", e)
+            cached = await asyncio.wait_for(
+                asyncio.to_thread(ctx.semantic_cache.lookup, request.question),
+                timeout=1.0,
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            if not isinstance(e, asyncio.TimeoutError):
+                logger.warning("[语义缓存] 查找异常: %s", e)
             cached = None
+
         if cached:
             record_id = save_record(
                 session_id=request.session_id,
@@ -267,17 +372,18 @@ async def chat(request: ChatRequest):
                 case_results=cached.get("case_results", []),
             )
 
+    # 缓存未命中，执行 RAG
     try:
-        result = ask(
-            rag_chain, retriever, llm,
+        result = await asyncio.to_thread(
+            ask, ctx.rag_chain, ctx.retriever, ctx.llm,
             request.question, request.session_id,
-            components=rag_components,
+            ctx.rag_components,
         )
 
         # 写入语义缓存
-        if semantic_cache:
+        if ctx.semantic_cache:
             try:
-                semantic_cache.store(
+                ctx.semantic_cache.store(
                     request.question, result["answer"],
                     result["sources"], result.get("domain", "综合"),
                     result.get("case_results", []),
@@ -304,35 +410,62 @@ async def chat(request: ChatRequest):
             case_results=result.get("case_results", []),
         )
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception("[Chat] 查询处理失败")
         raise HTTPException(
             status_code=500,
-            detail=f"查询处理失败: {str(e)}",
+            detail="查询处理失败，请稍后重试",
         )
 
 
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest):
     """法律咨询流式接口：SSE 逐 token 返回回答。"""
-    if rag_chain is None or retriever is None or llm is None:
+    sanitization = sanitize_input_enriched(request.question)
+    if not sanitization.allowed:
+        raise HTTPException(status_code=400, detail="输入包含不允许的内容")
+    request.question = sanitization.sanitized_text or ""
+    ctx = get_app_context()
+    components = ctx.rag_components or {}
+    if ctx.rag_chain is None or ctx.retriever is None or ctx.llm is None:
         raise HTTPException(
             status_code=503,
             detail="RAG 链尚未初始化，请等待服务就绪后重试",
         )
 
-    async def event_generator():
+    async def _resolve_stream():
+        """根据缓存/意图解析到对应的异步流，yield 事件。
+
+        优化：缓存查找设置 1s 超时，避免阻塞后续流程。
+        """
+        from app.document_state import get_pending_document
+        pending_document = get_pending_document(request.session_id)
+        if pending_document:
+            from app.document_chain import ask_document_stream
+            stream = ask_document_stream(
+                ctx.llm,
+                request.question,
+                request.session_id,
+                components=components,
+                document_type=pending_document.get("doc_type"),
+                case_state=pending_document.get("case_state"),
+                existing_fields=pending_document.get("extracted_fields"),
+            )
+            async for event in stream:
+                yield event
+            return
 
         # 语义缓存命中 → 模拟流式回放
-        if semantic_cache:
+        if ctx.semantic_cache:
             try:
-                cached = semantic_cache.lookup(request.question)
-            except Exception as e:
-                logger.warning("[语义缓存] 查找异常: %s", e)
+                cached = await asyncio.wait_for(
+                    asyncio.to_thread(ctx.semantic_cache.lookup, request.question),
+                    timeout=1.0,
+                )
+            except (asyncio.TimeoutError, Exception) as e:
+                if not isinstance(e, asyncio.TimeoutError):
+                    logger.warning("[语义缓存] 查找异常: %s", e)
                 cached = None
             if cached:
-                yield f"event: meta\ndata: {json.dumps({'domain': cached.get('domain', '综合'), 'cached': True}, ensure_ascii=False)}\n\n"
-                yield f"event: token\ndata: {json.dumps({'content': cached['answer']}, ensure_ascii=False)}\n\n"
                 record_id = save_record(
                     session_id=request.session_id,
                     question=request.question,
@@ -340,144 +473,166 @@ async def chat_stream(request: ChatRequest):
                     sources=cached["sources"],
                     domain=cached.get("domain", "综合"),
                 )
-                done_data = {
+                yield {"type": "meta", "domain": cached.get("domain", "综合"), "cached": True}
+                yield {"type": "token", "content": cached["answer"]}
+                yield {
+                    "type": "done",
                     "sources": cached["sources"],
-                    "risk_warning": "本回答由 AI 生成，仅供参考，不构成正式法律意见。",
+                    "risk_warning": RISK_WARNING,
                     "domain": cached.get("domain", "综合"),
                     "case_results": cached.get("case_results", []),
                     "cached": True,
-                    "record_id": record_id,
+                    "_record_id": record_id,
                 }
-                yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
                 return
-
-        answer_text = ""
-        sources = []
-        risk_warning = ""
 
         # Intent detection
         from app.classifier import classify_question_multi
         intent = "qa"
-        if analysis_graph and rag_components.get("enable_case_analysis", True):
+        classify_result = None
+        if ctx.analysis_graph and components.get("enable_case_analysis", True):
             try:
                 classify_result = classify_question_multi(
-                    llm, request.question,
-                    max_domains=rag_components.get("multi_domain_max_domains", 3),
+                    ctx.llm, request.question,
+                    max_domains=components.get("multi_domain_max_domains", 3),
                 )
                 intent = classify_result.get("intent", "qa")
-            except Exception:
+            except Exception as e:
+                logger.debug("[意图分类] 失败，回退 qa: %s", e)
                 intent = "qa"
 
-        if intent == "analysis" and analysis_graph:
-            # --- 案情分析路径 ---
-            from app.rag_chain import ask_analysis_stream
+        if intent == "analysis" and ctx.analysis_graph:
+            from app.analysis_chain import ask_analysis_stream
+            logger.info("[意图分发] analysis intent detected, starting analysis stream")
             stream = ask_analysis_stream(
-                analysis_graph, llm,
+                ctx.analysis_graph, ctx.llm,
                 request.question, request.session_id,
-                components=rag_components,
+                components=components,
             )
         elif intent == "statute":
-            # --- 诉讼时效路径 ---
-            from app.rag_chain import ask_statute_stream
+            from app.statute_chain import ask_statute_stream
             stream = ask_statute_stream(
-                llm,
+                ctx.llm,
                 request.question, request.session_id,
-                components=rag_components,
+                components=components,
             )
         elif intent == "document":
-            # --- 法律文书路径 ---
-            from app.rag_chain import ask_document_stream
+            from app.document_chain import ask_document_stream
             stream = ask_document_stream(
-                llm,
+                ctx.llm,
                 request.question, request.session_id,
-                components=rag_components,
+                components=components,
             )
         else:
-            # --- 普通 QA 路径 ---
+            # 传递分类结果给 graph 路径，避免重复分类
+            components_with_classify = {**components, "_classify_result": classify_result}
             stream = ask_stream(
-                rag_chain, retriever, llm,
+                ctx.rag_chain, ctx.retriever, ctx.llm,
                 request.question, request.session_id,
-                components=rag_components,
+                components=components_with_classify,
             )
 
-        while True:
-            try:
-                event = await asyncio.wait_for(stream.__anext__(), timeout=15)
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
-                # 15 秒无事件，发保活注释防止连接断开
-                yield ":keepalive\n\n"
-                continue
+        async for event in stream:
+            yield event
 
-            event_type = event["type"]
+    def _save_chat_event(event, answer_text):
+        """保存聊天记录到 DB，返回 record_id。"""
+        cs = event.get("case_state")
+        if isinstance(cs, dict):
+            cs = json.dumps(cs, ensure_ascii=False)
+        record_id = save_record(
+            session_id=request.session_id,
+            question=request.question,
+            answer=answer_text,
+            sources=event.get("sources", []),
+            domain=event.get("domain", "综合"),
+            case_state=cs,
+        )
+        _schedule_semantic_cache_store(
+            request.question,
+            answer_text,
+            event.get("sources", []),
+            event.get("domain", "综合"),
+            event.get("case_results", []),
+            cache=ctx.semantic_cache,
+        )
+        return record_id
 
-            if event_type == "meta":
-                meta_data = {"domain": event.get("domain", "综合")}
-                if "domains" in event:
-                    meta_data["domains"] = event["domains"]
-                    meta_data["multi_domain"] = event.get("multi_domain", False)
-                if "intent" in event:
-                    meta_data["intent"] = event["intent"]
-                yield f"event: meta\ndata: {json.dumps(meta_data, ensure_ascii=False)}\n\n"
-
-            elif event_type == "substep":
-                yield f"event: substep\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-
-            elif event_type == "token":
-                answer_text += event["content"]
-                yield f"event: token\ndata: {json.dumps({'content': event['content']}, ensure_ascii=False)}\n\n"
-
-            elif event_type == "done":
-                sources = event.get("sources", [])
-                risk_warning = event.get("risk_warning", "")
-                record_id = save_record(
-                    session_id=request.session_id,
-                    question=request.question,
-                    answer=answer_text,
-                    sources=sources,
-                    domain=event.get("domain", "综合"),
-                    case_state=event.get("case_state"),
-                )
-                # 写入语义缓存
-                if semantic_cache:
+    async def _stream_with_fallback():
+        """流式输出，带降级：若流式完全无内容，降级为非流式请求。"""
+        has_content = False
+        try:
+            async for event in _resolve_stream():
+                if event["type"] == "token":
+                    has_content = True
+                elif event["type"] == "error" and not has_content:
+                    # 流式完全无内容 → 降级为非流式
+                    logger.warning("[流式降级] 流式无内容，降级为非流式请求")
                     try:
-                        semantic_cache.store(
-                            request.question, answer_text,
-                            sources, event.get("domain", "综合"),
-                            event.get("case_results", []),
+                        result = await asyncio.to_thread(
+                            ask, ctx.rag_chain, ctx.retriever, ctx.llm,
+                            request.question, request.session_id,
+                            components,
                         )
-                    except Exception as e:
-                        logger.warning("[语义缓存] 写入异常: %s", e)
-                done_data = {
-                    "sources": sources,
-                    "risk_warning": risk_warning,
-                    "record_id": record_id,
-                }
-                if "domain" in event:
-                    done_data["domain"] = event["domain"]
-                if "multi_domain" in event:
-                    done_data["multi_domain"] = event["multi_domain"]
-                if "case_results" in event:
-                    done_data["case_results"] = event["case_results"]
-                yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
+                        record_id = save_record(
+                            session_id=request.session_id,
+                            question=request.question,
+                            answer=result["answer"],
+                            sources=result["sources"],
+                            domain=result.get("domain", "综合"),
+                            case_state=result.get("case_state"),
+                        )
+                        _schedule_semantic_cache_store(
+                            request.question,
+                            result["answer"],
+                            result["sources"],
+                            result.get("domain", "综合"),
+                            result.get("case_results", []),
+                            cache=ctx.semantic_cache,
+                        )
+                        yield {"type": "meta", "domain": result.get("domain", "综合")}
+                        yield {"type": "token", "content": result["answer"]}
+                        yield {
+                            "type": "done",
+                            "sources": result["sources"],
+                            "risk_warning": result.get("risk_warning", RISK_WARNING),
+                            "domain": result.get("domain", "综合"),
+                            "case_results": result.get("case_results", []),
+                            "record_id": record_id,
+                        }
+                        return
+                    except Exception as fallback_err:
+                        logger.exception("[流式降级] 非流式也失败")
+                        yield {"type": "error", "message": "查询处理失败，请稍后重试"}
+                        return
+                yield event
+        except Exception:
+            if not has_content:
+                yield {"type": "error", "message": "服务内部错误，请稍后重试"}
 
-            elif event_type == "error":
-                yield f"event: error\ndata: {json.dumps({'message': event['message']}, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        _sse_generator(_stream_with_fallback(), save_fn=_save_chat_event),
+        media_type="text/event-stream",
+    )
 
 
 class DocumentRequest(BaseModel):
     """法律文书生成请求体。"""
     document_type: str = Field(
-        ...,
-        description="文书类型：labor_arbitration / civil_complaint / lawyer_letter / contract_review",
+        default="",
+        description="文书类型：labor_arbitration_application",
+    )
+    doc_type: str = Field(
+        default="",
+        description="结构化 action 中的文书类型",
     )
     case_state: Optional[dict] = Field(
         default=None,
         description="案情状态（从分析报告跳转时传入）",
     )
+    action: str = Field(default="", description="结构化动作，如 generate_document")
+    source: str = Field(default="", description="来源，如 case_analysis")
+    case_analysis_id: str = Field(default="", description="案情分析结果 ID")
     session_id: str = Field(default="default", description="会话 ID")
     extra_info: str = Field(
         default="",
@@ -487,18 +642,67 @@ class DocumentRequest(BaseModel):
 
 @app.post("/api/document")
 async def generate_document(request: DocumentRequest):
-    """法律文书生成接口：SSE 流式返回文书内容。"""
-    if llm is None:
+    """法律文书生成接口。"""
+    ctx = get_app_context()
+    if ctx.llm is None:
         raise HTTPException(status_code=503, detail="LLM 尚未初始化")
 
-    from app.rag_chain import generate_document_from_api
+    from app.document_chain import generate_document_from_api
+    from app.case_analysis_store import get_case_analysis
+    from app.labor_case_guard import is_labor_case_context
+
+    document_type = request.doc_type or request.document_type or "labor_arbitration_application"
+    case_state = request.case_state
+    if request.case_analysis_id:
+        record = get_case_analysis(request.case_analysis_id, request.session_id)
+        if record:
+            case_state = {**(case_state or {}), **record}
+
+    if (
+        document_type == "labor_arbitration_application"
+        and request.action == "generate_document"
+        and (request.case_analysis_id or request.source == "case_analysis")
+        and case_state is not None
+        and not is_labor_case_context(case_state, request.extra_info)
+    ):
+        message = "当前案情不属于劳动争议，暂不支持生成劳动仲裁申请书。"
+
+        async def _unsupported_stream():
+            result = {
+                "type": "document_generation_result",
+                "doc_type": document_type,
+                "status": "unsupported",
+                "missing_fields": [],
+                "message": message,
+                "warnings": [message],
+            }
+            yield {
+                "type": "meta",
+                "intent": "document",
+                "domain": case_state.get("primary_domain") or case_state.get("case_type") or "综合",
+                "doc_type": document_type,
+            }
+            yield {"type": "token", "content": message}
+            yield {
+                "type": "done",
+                "sources": [],
+                "risk_warning": RISK_WARNING,
+                "domain": case_state.get("primary_domain") or case_state.get("case_type") or "综合",
+                "doc_type": document_type,
+                "status": "unsupported",
+                "document_result": result,
+                "warnings": result["warnings"],
+            }
+
+        return StreamingResponse(_sse_generator(_unsupported_stream()), media_type="text/event-stream")
+
     stream = generate_document_from_api(
-        llm,
-        document_type=request.document_type,
-        case_state=request.case_state,
+        ctx.llm,
+        document_type=document_type,
+        case_state=case_state,
         extra_info=request.extra_info,
         session_id=request.session_id,
-        components=rag_components,
+        components=ctx.rag_components,
     )
 
     return StreamingResponse(_sse_generator(stream), media_type="text/event-stream")
@@ -516,6 +720,32 @@ async def submit_feedback(request: FeedbackRequest):
     if request.feedback not in (1, -1):
         raise HTTPException(status_code=400, detail="feedback 必须是 1 或 -1")
     ok = save_feedback(request.record_id, request.feedback)
+    if not ok:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return {"ok": True}
+
+
+@app.get("/api/feedback/stats")
+async def feedback_stats():
+    """获取反馈统计数据（总体 + 按领域分组）。"""
+    return get_feedback_stats()
+
+
+@app.get("/api/feedback/reviews")
+async def feedback_reviews(limit: int = 50, offset: int = 0):
+    """获取差评记录列表，供人工审核。"""
+    return get_negative_reviews(limit=limit, offset=offset)
+
+
+class AnswerCorrectionRequest(BaseModel):
+    """修正回答请求体。"""
+    answer: str = Field(..., min_length=1, description="修正后的回答内容")
+
+
+@app.put("/api/feedback/{record_id}/answer")
+async def correct_answer(record_id: int, request: AnswerCorrectionRequest):
+    """人工审核后修正回答内容。"""
+    ok = update_answer(record_id, request.answer)
     if not ok:
         raise HTTPException(status_code=404, detail="记录不存在")
     return {"ok": True}
@@ -606,16 +836,25 @@ async def export_session(session_id: str):
 
 
 @app.get("/api/config")
-async def get_config():
-    """获取当前可热更新的配置参数。"""
+async def get_config(request: Request, x_api_key: str = Header(default="")):
+    """获取当前可热更新的配置参数。需 ADMIN_API_KEY 鉴权。"""
     from app.config import settings
+    _require_admin(request, x_api_key)
     return settings.get_hot_config()
 
 
+@app.get("/api/metrics")
+async def get_metrics(request: Request, x_api_key: str = Header(default="")):
+    """获取请求指标（计数、延迟、错误率）。需 ADMIN_API_KEY 鉴权。"""
+    _require_admin(request, x_api_key)
+    return metrics.snapshot()
+
+
 @app.put("/api/config")
-async def update_config(updates: dict):
-    """运行时更新配置参数（仅白名单内字段生效）。"""
+async def update_config(updates: dict, request: Request, x_api_key: str = Header(default="")):
+    """运行时更新配置参数（仅白名单内字段生效）。需 ADMIN_API_KEY 鉴权。"""
     from app.config import settings
+    _require_admin(request, x_api_key)
     updated = settings.update(updates)
     if not updated:
         raise HTTPException(status_code=400, detail="没有有效的配置项被更新")

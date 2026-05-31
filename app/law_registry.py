@@ -12,6 +12,20 @@ import yaml
 
 _REGISTRY_PATH = Path(__file__).parent / "law_registry.yaml"
 
+DEFAULT_STRONG_DOCUMENT_KEYWORDS = [
+    "生成",
+    "起草",
+    "帮我写",
+    "写",
+    "申请书",
+    "起诉状",
+    "律师函",
+    "法律文书",
+    "文书",
+    "模板",
+    "仲裁申请",
+]
+
 
 def _load_yaml() -> dict:
     with open(_REGISTRY_PATH, encoding="utf-8") as f:
@@ -47,6 +61,27 @@ def load_domain_keywords() -> Dict[str, List[str]]:
     """领域 → 关键词列表（兼容旧接口）。"""
     weighted = load_domain_weighted_keywords()
     return {domain: list(kws.keys()) for domain, kws in weighted.items()}
+
+
+def load_synonym_groups() -> List[List[str]]:
+    """加载同义词组列表。"""
+    data = _load_yaml()
+    return data.get("synonym_groups", [])
+
+
+def load_intent_keywords() -> Dict[str, List[str]]:
+    """加载意图关键词映射（analysis / statute / document）。"""
+    data = _load_yaml()
+    return data.get("intent_keywords", {})
+
+
+def load_document_strong_keywords() -> List[str]:
+    """加载文书意图强关键词；缺失时使用保守默认值保持兼容。"""
+    data = _load_yaml()
+    configured = data.get("document_classification", {}).get("strong_keywords")
+    if not configured:
+        return DEFAULT_STRONG_DOCUMENT_KEYWORDS.copy()
+    return [str(item) for item in configured if str(item).strip()]
 
 
 def load_classify_prompt_text() -> str:

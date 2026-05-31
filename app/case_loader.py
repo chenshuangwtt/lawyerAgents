@@ -159,7 +159,8 @@ class CaseSearcher:
                 "SELECT DISTINCT legal_domain FROM cases WHERE legal_domain IS NOT NULL AND legal_domain != ''"
             ).fetchall()
             return {r[0].strip() for r in rows}
-        except Exception:
+        except Exception as e:
+            logger.debug("[案例库] 查询领域列表失败: %s", e)
             return set()
 
     def _extract_keywords(self, query: str) -> List[str]:
@@ -186,7 +187,8 @@ class CaseSearcher:
                 LIMIT ?
             """, (fts_query, top_k)).fetchall()
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            logger.debug("[案例库] FTS5 检索失败: %s", e)
             return []
 
     def _search_like(self, query: str, top_k: int) -> List[Dict]:
@@ -200,7 +202,8 @@ class CaseSearcher:
                 LIMIT ?
             """, (f"%{query[:50]}%", f"%{query[:50]}%", f"%{query[:30]}%", top_k)).fetchall()
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            logger.debug("[案例库] LIKE 检索失败: %s", e)
             return []
 
     def _search_semantic(self, query: str, top_k: int) -> List[Dict]:
@@ -235,7 +238,8 @@ class CaseSearcher:
             id_map = {r["case_id"]: dict(r) for r in rows}
             # 保持 LanceDB 排序
             return [id_map[cid] for cid in case_ids if cid in id_map]
-        except Exception:
+        except Exception as e:
+            logger.debug("[案例库] 语义检索补全失败: %s", e)
             return []
 
     @staticmethod

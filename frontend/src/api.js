@@ -21,7 +21,7 @@ export function sendMessage(question, sessionId = 'default') {
  * @param {object} callbacks - { onMeta, onToken, onDone, onError, onSubstep }
  * @returns {boolean} 是否有内容输出
  */
-async function parseSSEStream(reader, { onMeta, onToken, onDone, onError, onSubstep }) {
+async function parseSSEStream(reader, { onMeta, onToken, onDone, onError, onSubstep, onSourcesReady }) {
   const decoder = new TextDecoder()
   let buffer = ''
   let hasContent = false
@@ -44,6 +44,7 @@ async function parseSSEStream(reader, { onMeta, onToken, onDone, onError, onSubs
         else if (eventType === 'token') { onToken?.(data); hasContent = true }
         else if (eventType === 'done') onDone?.(data)
         else if (eventType === 'substep') onSubstep?.(data)
+        else if (eventType === 'sources_ready') onSourcesReady?.(data)
         else if (eventType === 'error') onError?.(data.message)
         eventType = null
       }
@@ -53,14 +54,21 @@ async function parseSSEStream(reader, { onMeta, onToken, onDone, onError, onSubs
   return hasContent
 }
 
-/** 发送法律咨询问题（流式 SSE，支持自动重试） */
-export async function sendMessageStream(question, sessionId, callbacks) {
+/**
+ * 发送法律咨询问题（流式 SSE，支持自动重试）。
+ * @param {string} question
+ * @param {string} sessionId
+ * @param {object} callbacks
+ * @param {AbortSignal} [signal] - 可选的 AbortSignal，用于取消请求
+ */
+export async function sendMessageStream(question, sessionId, callbacks, signal) {
   const MAX_RETRIES = 2
   let lastError = null
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (signal?.aborted) return
     if (attempt > 0) {
-      const delay = 1000 * Math.pow(2, attempt - 1) // 1s, 2s
+      const delay = 1000 * Math.pow(2, attempt - 1)
       await new Promise(r => setTimeout(r, delay))
     }
 
@@ -69,6 +77,7 @@ export async function sendMessageStream(question, sessionId, callbacks) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question, session_id: sessionId }),
+        signal,
       })
 
       if (!res.ok) {
@@ -78,15 +87,18 @@ export async function sendMessageStream(question, sessionId, callbacks) {
       }
 
       const reader = res.body.getReader()
+      let hasContent = false
       try {
-        const hasContent = await parseSSEStream(reader, callbacks)
-        return // 成功，退出
-      } catch {
+        hasContent = await parseSSEStream(reader, callbacks)
+        return
+      } catch (e) {
+        if (e.name === 'AbortError') return
         if (hasContent) return
         lastError = '响应中断'
         continue
       }
-    } catch {
+    } catch (e) {
+      if (e.name === 'AbortError') return
       lastError = '网络连接失败'
       continue
     }
@@ -135,18 +147,49 @@ export function submitFeedback(recordId, feedback) {
   return http.post('/feedback', { record_id: recordId, feedback }).then(r => r.data)
 }
 
-/** 生成法律文书（流式 SSE） */
-export async function sendDocumentStream(documentType, { case_state, sessionId, extra_info }, callbacks) {
+/** 获取反馈统计数据 */
+export function getFeedbackStats() {
+  return http.get('/feedback/stats').then(r => r.data)
+}
+
+/** 获取差评记录列表 */
+export function getNegativeReviews(limit = 50, offset = 0) {
+  return http.get('/feedback/reviews', { params: { limit, offset } }).then(r => r.data)
+}
+
+/** 修正回答内容 */
+export function correctAnswer(recordId, answer) {
+  return http.put(`/feedback/${recordId}/answer`, { answer }).then(r => r.data)
+}
+
+/**
+ * 生成法律文书（流式 SSE）。
+ * @param {string} documentType
+ * @param {object} params
+ * @param {object} callbacks
+ * @param {AbortSignal} [signal] - 可选的 AbortSignal，用于取消请求
+ */
+export async function sendDocumentStream(
+  documentType,
+  { case_state, sessionId, extra_info, action, source, case_analysis_id, doc_type },
+  callbacks,
+  signal,
+) {
   try {
     const res = await fetch('/api/document', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         document_type: documentType,
+        doc_type: doc_type || documentType,
+        action: action || 'generate_document',
+        source: source || '',
+        case_analysis_id: case_analysis_id || '',
         case_state: case_state || null,
         session_id: sessionId || 'default',
         extra_info: extra_info || '',
       }),
+      signal,
     })
 
     if (!res.ok) {
@@ -157,7 +200,8 @@ export async function sendDocumentStream(documentType, { case_state, sessionId, 
 
     const reader = res.body.getReader()
     await parseSSEStream(reader, callbacks)
-  } catch {
+  } catch (e) {
+    if (e.name === 'AbortError') return
     callbacks.onError?.('网络连接失败')
   }
 }

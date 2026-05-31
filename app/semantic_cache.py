@@ -6,7 +6,7 @@
   2. 语义匹配 — embedding 余弦相似度，阈值 0.92
 
 用法：
-    cache = SemanticCache(embeddings, db_path="./data/db/semantic_cache.db")
+    cache = SemanticCache(embeddings)
     cached = cache.lookup("试用期最长多久？")
     if cached:
         return cached  # {"answer": ..., "sources": ..., "domain": ...}
@@ -21,9 +21,16 @@ import math
 import os
 import struct
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+
+from app.storage_paths import (
+    DEFAULT_APP_DB_PATH,
+    LEGACY_SEMANTIC_CACHE_DB_PATH,
+    get_app_db_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,8 @@ def _batch_cosine_similarity(query_vec: List[float], matrix) -> List[float]:
         (N,) 相似度列表
     """
     import numpy as np
+    if len(matrix) == 0:
+        return []
     q = np.asarray(query_vec, dtype=np.float32)
     q_norm = np.linalg.norm(q)
     if q_norm == 0:
@@ -86,19 +95,27 @@ class SemanticCache:
     def __init__(
         self,
         embeddings,
-        db_path: str = "./data/db/semantic_cache.db",
+        db_path: str = "",
         threshold: float = 0.92,
         ttl_hours: int = 72,
         max_items: int = 1000,
     ):
+        db_path = db_path or get_app_db_path()
         self._embeddings = embeddings
         self._threshold = threshold
         self._ttl_hours = ttl_hours
         self._max_items = max_items
+        self._db_path = db_path
+        self._lock = threading.Lock()
+        self._closed = False
+        self._embedding_cache = None  # (hashes, matrix) 懒加载缓存
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._init_table()
+        self._migrate_legacy_cache()
         self._cleanup_expired()
 
     def _init_table(self):
@@ -121,10 +138,74 @@ class SemanticCache:
             self._conn.execute("ALTER TABLE semantic_cache ADD COLUMN case_results TEXT NOT NULL DEFAULT '[]'")
         except sqlite3.OperationalError:
             pass
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+        """)
         self._conn.commit()
 
+    def _migrate_legacy_cache(self):
+        """首次切换到 app.sqlite3 时导入旧 semantic_cache.db，保留旧文件不删除。"""
+        if os.path.abspath(self._db_path) != os.path.abspath(str(DEFAULT_APP_DB_PATH)):
+            return
+        legacy_path = str(LEGACY_SEMANTIC_CACHE_DB_PATH)
+        if not os.path.exists(legacy_path) or os.path.abspath(self._db_path) == os.path.abspath(legacy_path):
+            return
+        marker = "legacy_semantic_cache_db"
+        if self._conn.execute("SELECT 1 FROM app_migrations WHERE name = ?", (marker,)).fetchone():
+            return
+
+        try:
+            self._conn.execute("ATTACH DATABASE ? AS legacy_cache", (legacy_path,))
+            table = self._conn.execute(
+                "SELECT name FROM legacy_cache.sqlite_master WHERE type='table' AND name='semantic_cache'"
+            ).fetchone()
+            if table:
+                cols = {
+                    r[1] for r in self._conn.execute(
+                        "PRAGMA legacy_cache.table_info(semantic_cache)"
+                    ).fetchall()
+                }
+                defaults = {
+                    "question_hash": "''",
+                    "question": "''",
+                    "embedding": "x''",
+                    "answer": "''",
+                    "sources": "'[]'",
+                    "domain": "''",
+                    "case_results": "'[]'",
+                    "hit_count": "0",
+                    "created_at": "datetime('now')",
+                    "last_hit_at": "datetime('now')",
+                }
+                select_cols = ", ".join(
+                    col if col in cols else f"{default_expr} AS {col}"
+                    for col, default_expr in defaults.items()
+                )
+                self._conn.execute(
+                    f"""
+                    INSERT OR IGNORE INTO semantic_cache (
+                        question_hash, question, embedding, answer, sources,
+                        domain, case_results, hit_count, created_at, last_hit_at
+                    )
+                    SELECT {select_cols} FROM legacy_cache.semantic_cache
+                    """
+                )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO app_migrations(name, applied_at) VALUES (?, ?)",
+                (marker, datetime.now().isoformat()),
+            )
+            self._conn.commit()
+        finally:
+            try:
+                self._conn.execute("DETACH DATABASE legacy_cache")
+            except Exception:
+                pass
+
     def _cleanup_expired(self):
-        """清除过期条目 + 超限淘汰。"""
+        """清除过期条目 + 超限淘汰。调用方需持锁或在初始化时调用。"""
         cutoff = (datetime.now() - timedelta(hours=self._ttl_hours)).isoformat()
         cur = self._conn.execute(
             "DELETE FROM semantic_cache WHERE created_at < ?", (cutoff,)
@@ -156,6 +237,9 @@ class SemanticCache:
         Returns:
             {"answer": str, "sources": list, "domain": str, "cached": True} 或 None
         """
+        if self._closed:
+            raise RuntimeError("SemanticCache has been closed")
+
         q_hash = _question_hash(question)
 
         # 1. 精确匹配
@@ -163,11 +247,12 @@ class SemanticCache:
             "SELECT * FROM semantic_cache WHERE question_hash = ?", (q_hash,)
         ).fetchone()
         if row:
-            self._conn.execute(
-                "UPDATE semantic_cache SET hit_count = hit_count + 1, last_hit_at = ? WHERE question_hash = ?",
-                (datetime.now().isoformat(), q_hash),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE semantic_cache SET hit_count = hit_count + 1, last_hit_at = ? WHERE question_hash = ?",
+                    (datetime.now().isoformat(), q_hash),
+                )
+                self._conn.commit()
             logger.info("[语义缓存] 精确命中: %s", question[:40])
             return self._row_to_result(row)
 
@@ -178,51 +263,48 @@ class SemanticCache:
             logger.warning("[语义缓存] Embedding 失败: %s", e)
             return None
 
-        rows = self._conn.execute(
-            "SELECT question_hash, embedding, answer, sources, domain, case_results FROM semantic_cache"
-        ).fetchall()
-
-        if not rows:
+        # 使用内存缓存的 embedding 矩阵，避免每次全量加载
+        cached_hashes, cached_matrix = self._load_embeddings_cache()
+        if not cached_hashes:
             return None
 
-        # 批量解包 embedding 并用 numpy 计算余弦相似度
         try:
             import numpy as np
-            embeddings_matrix = np.array(
-                [_unpack_embedding(row["embedding"]) for row in rows],
-                dtype=np.float32,
-            )
-            similarities = _batch_cosine_similarity(query_vec, embeddings_matrix)
+            similarities = _batch_cosine_similarity(query_vec, cached_matrix)
             best_idx = int(np.argmax(similarities))
             best_sim = similarities[best_idx]
-            best_row = rows[best_idx]
-            best_hash = best_row["question_hash"]
+            best_hash = cached_hashes[best_idx]
         except ImportError:
-            # numpy 不可用时回退到逐条计算
             best_sim = 0.0
-            best_row = None
             best_hash = None
-            for row in rows:
-                cached_vec = _unpack_embedding(row["embedding"])
-                sim = _cosine_similarity(query_vec, cached_vec)
+            for i, h in enumerate(cached_hashes):
+                sim = _cosine_similarity(query_vec, cached_matrix[i].tolist())
                 if sim > best_sim:
                     best_sim = sim
-                    best_row = row
-                    best_hash = row["question_hash"]
+                    best_hash = h
 
-        if best_sim >= self._threshold and best_row:
-            self._conn.execute(
-                "UPDATE semantic_cache SET hit_count = hit_count + 1, last_hit_at = ? WHERE question_hash = ?",
-                (datetime.now().isoformat(), best_hash),
-            )
-            self._conn.commit()
+        if best_sim >= self._threshold and best_hash:
+            row = self._conn.execute(
+                "SELECT * FROM semantic_cache WHERE question_hash = ?", (best_hash,)
+            ).fetchone()
+            if not row:
+                return None
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE semantic_cache SET hit_count = hit_count + 1, last_hit_at = ? WHERE question_hash = ?",
+                    (datetime.now().isoformat(), best_hash),
+                )
+                self._conn.commit()
             logger.info("[语义缓存] 语义命中 (sim=%.2f): %s", best_sim, question[:40])
-            return self._row_to_result(best_row)
+            return self._row_to_result(row)
 
         return None
 
     def store(self, question: str, answer: str, sources: List[Dict], domain: str, case_results: List[Dict] = None):
         """写入缓存。"""
+        if self._closed:
+            raise RuntimeError("SemanticCache has been closed")
+
         q_hash = _question_hash(question)
 
         try:
@@ -232,19 +314,21 @@ class SemanticCache:
             return
 
         now = datetime.now().isoformat()
-        self._conn.execute("""
-            INSERT OR REPLACE INTO semantic_cache
-            (question_hash, question, embedding, answer, sources, domain, case_results, hit_count, created_at, last_hit_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-        """, (q_hash, question.strip(), _pack_embedding(vec), answer,
-              json.dumps(sources, ensure_ascii=False), domain,
-              json.dumps(case_results or [], ensure_ascii=False), now, now))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("""
+                INSERT OR REPLACE INTO semantic_cache
+                (question_hash, question, embedding, answer, sources, domain, case_results, hit_count, created_at, last_hit_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """, (q_hash, question.strip(), _pack_embedding(vec), answer,
+                  json.dumps(sources, ensure_ascii=False), domain,
+                  json.dumps(case_results or [], ensure_ascii=False), now, now))
+            self._conn.commit()
+            self._embedding_cache = None  # 失效缓存
 
-        # 定期清理
-        count = self._conn.execute("SELECT COUNT(*) FROM semantic_cache").fetchone()[0]
-        if count % 50 == 0:
-            self._cleanup_expired()
+            # 定期清理
+            count = self._conn.execute("SELECT COUNT(*) FROM semantic_cache").fetchone()[0]
+            if count % 50 == 0:
+                self._cleanup_expired()
 
         logger.info("[语义缓存] 写入: %s (共 %d 条)", question[:40], count)
 
@@ -258,5 +342,34 @@ class SemanticCache:
             "cached": True,
         }
 
+    def _load_embeddings_cache(self):
+        """懒加载并缓存 embedding 矩阵。store() 后自动失效。"""
+        if self._embedding_cache is not None:
+            return self._embedding_cache
+
+        try:
+            import numpy as np
+            rows = self._conn.execute(
+                "SELECT question_hash, embedding FROM semantic_cache"
+            ).fetchall()
+            if not rows:
+                return [], np.empty((0, 0), dtype=np.float32)
+            hashes = [r["question_hash"] for r in rows]
+            matrix = np.array(
+                [_unpack_embedding(r["embedding"]) for r in rows],
+                dtype=np.float32,
+            )
+            self._embedding_cache = (hashes, matrix)
+            return self._embedding_cache
+        except ImportError:
+            rows = self._conn.execute(
+                "SELECT question_hash, embedding FROM semantic_cache"
+            ).fetchall()
+            hashes = [r["question_hash"] for r in rows]
+            matrix = [_unpack_embedding(r["embedding"]) for r in rows]
+            return hashes, matrix
+
     def close(self):
-        self._conn.close()
+        with self._lock:
+            self._closed = True
+            self._conn.close()

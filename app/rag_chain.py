@@ -18,41 +18,39 @@ import time
 from typing import List, Dict, Any, Optional
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.documents import Document
-from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.chat_history import (
-    BaseChatMessageHistory,
-    InMemoryChatMessageHistory,
-)
 from langchain_core.vectorstores import VectorStore
 
 from app.classifier import classify_question
-from app.hybrid_retriever import ChineseBM25Retriever, reciprocal_rank_fusion
+from app.hybrid_retriever import ChineseBM25Retriever
 from app.reranker import CrossEncoderReranker
-from app.article_index import get_adjacent_articles
-from app.memory_compression import compress_messages
-from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
-
-# 款级引用模式：匹配"第X条第Y款"格式
-PARA_PATTERN = re.compile(
-    r'第([一二三四五六七八九十百千万0-9]+)条(?:之([一二三四五六七八九十]+))?'
-    r'(?:第([一二三四五六七八九十百千万0-9]+)款)?'
+from app.core import (
+    RISK_WARNING,
+    invoke_with_timeout, _get_session_history, CompressedChatMessageHistory,
+    _compression_config,
+)
+from app.rag_citations import (
+    format_case_context as _format_case_context,
+    verify_citations as _verify_citations,
+    verify_citations_semantic as _verify_citations_semantic,
+    verify_sources as _verify_sources,
+)
+from app.rag_context import (
+    build_context_text,
+    build_official_case_context,
+    inject_definitions as _inject_definitions,
+    merge_interpretation_docs,
+    retrieve_interpretation_docs as _retrieve_interpretation_docs,
+    search_cases as _search_cases,
+)
+from app.rag_retrieval import (
+    expand_retrieved_context,
+    hybrid_retrieve,
+    rerank_documents,
 )
 
 logger = logging.getLogger(__name__)
-
-# 概览类问题关键词：匹配任一则跳过案例检索
-_OVERVIEW_PATTERNS = re.compile(
-    r"(了解|概述|法律规定|什么是|介绍|有哪些|相关法律|规定了|主要内容|"
-    r"立法|全文|条文|总则|分则|基本原则|基本概念|总体|概述|体系|示例)",
-)
-
-
-def _is_overview_question(question: str) -> bool:
-    """判断是否为宽泛的法律概览类问题（此类问题无需检索案例）。"""
-    return bool(_OVERVIEW_PATTERNS.search(question))
 
 
 # 案情状态提取 prompt
@@ -121,14 +119,6 @@ def _get_case_state(session_id: str) -> Optional[str]:
     except Exception:
         pass
     return None
-
-
-def invoke_with_timeout(llm, messages, timeout: int = 15):
-    """同步调用 LLM，超时则抛出 TimeoutError。"""
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(llm.invoke, messages)
-        return future.result(timeout=timeout)
 
 
 # === Prompt: 追问 → 独立法律问题 ===
@@ -232,59 +222,52 @@ QA_MULTI_DOMAIN_PROMPT = ChatPromptTemplate.from_messages([
 用户问题：{question}"""),
 ])
 
-# 按 session_id 存储对话历史
-_session_store: Dict[str, BaseChatMessageHistory] = {}
-_MAX_SESSION_STORE = 200  # 最多缓存的会话数
-
-# 记忆压缩配置（由 build_rag_chain 设置）
-_compression_config: Dict[str, Any] = {}
-
-# 风险提示常量
-RISK_WARNING = "本回答由 AI 生成，仅供参考，不构成正式法律意见。如需专业法律服务，请咨询持证律师。"
+# 简单查询模式：短问题 + 无复杂法律关键词 → 跳过 rerank 和案例检索
+_SIMPLE_QUERY_MAX_LEN = 15
+_SIMPLE_QUERY_SKIP_PATTERNS = re.compile(
+    r"(区别|对比|比较|分析|案例|判例|诉讼|仲裁|起诉|上诉|抗辩|"
+    r"构成|认定|责任|赔偿|计算|标准|程序|流程|时效|期限|"
+    r"怎么样|怎么办|如何处理|有哪些情形|什么情况下)",
+)
 
 
-class CompressedChatMessageHistory(BaseChatMessageHistory):
-    """带记忆压缩的对话历史：add_messages 后自动触发三层压缩。"""
+def _post_process_answer(
+    answer_text: str,
+    reranked_docs: list,
+    article_index: dict,
+    question: str,
+    domain: str,
+    components: dict,
+    skip_case_search: bool = False,
+) -> dict:
+    """统一的后处理流水线：引用校验 → 案例检索 → 案情状态提取。
 
-    def __init__(self, llm: Optional[BaseChatModel] = None):
-        self._store = InMemoryChatMessageHistory()
-        self._llm = llm
+    替代三个代码路径中重复的 (format_sources + verify_citations + case_search + case_state) 块。
+    """
+    sources = _verify_sources(answer_text, reranked_docs, article_index, components)
 
-    @property
-    def messages(self) -> List[BaseMessage]:
-        msgs = self._store.messages
-        if not msgs:
-            return msgs
-        cfg = _compression_config
-        return compress_messages(
-            msgs,
-            llm=self._llm,
-            keep_recent_rounds=cfg.get("keep_recent_rounds", 3),
-            summary_trigger_rounds=cfg.get("summary_trigger_rounds", 5),
-            summary_max_chars=cfg.get("summary_max_chars", 1500),
-            max_tokens=cfg.get("max_tokens", 4000),
-            enable_summary=cfg.get("enable_summary", True),
-            debug=cfg.get("debug", False),
-        )
+    case_results = []
+    if not skip_case_search:
+        case_results = _search_cases(question, domain, components)
 
-    def add_messages(self, messages: List[BaseMessage]) -> None:
-        self._store.add_messages(messages)
+    lightweight_llm = components.get("lightweight_llm")
+    new_case_state = None
+    if lightweight_llm:
+        new_case_state = _extract_case_state(lightweight_llm, question, answer_text)
 
-    def clear(self) -> None:
-        self._store.clear()
+    return {
+        "sources": sources,
+        "case_results": case_results,
+        "case_state": new_case_state,
+    }
 
 
-def _get_session_history(session_id: str) -> BaseChatMessageHistory:
-    """获取或创建指定 session 的对话历史（带压缩）。"""
-    if session_id not in _session_store:
-        # LRU 淘汰：超过上限时删除最早的条目
-        if len(_session_store) >= _MAX_SESSION_STORE:
-            oldest_key = next(iter(_session_store))
-            del _session_store[oldest_key]
-            logger.debug("[会话缓存] 淘汰旧会话: %s", oldest_key)
-        llm = _compression_config.get("llm")
-        _session_store[session_id] = CompressedChatMessageHistory(llm=llm)
-    return _session_store[session_id]
+def _is_simple_query(question: str) -> bool:
+    """判断是否为简单查询（如"试用期最长多久？"），可跳过 rerank 和案例检索。"""
+    q = question.strip()
+    if len(q) > _SIMPLE_QUERY_MAX_LEN:
+        return False
+    return not _SIMPLE_QUERY_SKIP_PATTERNS.search(q)
 
 
 def _contextualize_query(
@@ -306,15 +289,15 @@ def _contextualize_query(
         chat_history=history,
         question=question,
     )
-    logger.info("[query重写] 开始...")
+    logger.debug("[query重写] 开始...")
     try:
         response = invoke_with_timeout(llm, messages, timeout=15)
         rewritten = response.content if hasattr(response, "content") else str(response)
         rewritten = rewritten.strip()
         if rewritten and rewritten != question:
-            logger.info("[query重写] \"%s\" -> \"%s\"", question, rewritten)
+            logger.debug("[query重写] \"%s\" -> \"%s\"", question, rewritten)
         else:
-            logger.info("[query重写] 完成（无变化）")
+            logger.debug("[query重写] 完成（无变化）")
         return rewritten
     except TimeoutError:
         logger.warning("[query重写] 15s 超时，使用原问题")
@@ -322,235 +305,6 @@ def _contextualize_query(
     except Exception as e:
         logger.warning("[query重写] 失败: %s，使用原问题", e)
         return question
-
-
-# --- 来源格式化 ---
-
-def _extract_article_numbers(text: str) -> List[str]:
-    """从文本中提取所有"第X条"或"第X条第Y款"形式的条号。"""
-    para_matches = re.findall(r'第[（(]?[一二三四五六七八九十百千零\d]+[）)]?条(?:第[一二三四五六七八九十百千零\d]+款)?', text)
-    seen = set()
-    result = []
-    for m in para_matches:
-        if m not in seen:
-            seen.add(m)
-            result.append(m)
-    return result
-
-
-def _format_sources(docs, answer: str = "") -> List[Dict[str, str]]:
-    """
-    将检索来源格式化为精简列表。
-
-    如果提供了 AI 回答文本，则从回答中提取实际引用的条号，
-    而不是从检索 chunk 中提取（chunk 的条号可能与回答引用的不一致）。
-    """
-    # 收集所有涉及的法律名称（去重保序）
-    seen_laws = []
-    for doc in docs:
-        law = doc.metadata.get("source", "")
-        if law and law not in seen_laws:
-            seen_laws.append(law)
-
-    if answer:
-        # 从 AI 回答中提取实际引用的条号
-        cited_articles = _extract_article_numbers(answer)
-        # 按法律名分组（每部法律下有哪些引用的条号）
-        law_articles: Dict[str, List[str]] = {law: [] for law in seen_laws}
-        for art in cited_articles:
-            # 找到包含该条号的 chunk 所属法律
-            matched = False
-            for doc in docs:
-                chunk_articles = doc.metadata.get("article_numbers", "")
-                if art in chunk_articles:
-                    law = doc.metadata.get("source", "")
-                    if law and art not in law_articles.get(law, []):
-                        law_articles.setdefault(law, []).append(art)
-                    matched = True
-                    break
-            # 如果 chunk 中没找到匹配，放到第一个法律下（兜底）
-            if not matched and seen_laws:
-                if art not in law_articles.get(seen_laws[0], []):
-                    law_articles.setdefault(seen_laws[0], []).append(art)
-
-        sources = []
-        for law in seen_laws:
-            arts = law_articles.get(law, [])
-            label = f"{law} {'、'.join(arts)}" if arts else law
-            sources.append({"source": label, "content": "", "full_content": ""})
-        return sources
-    else:
-        # 无回答文本时，从 chunk 内容提取（兼容旧逻辑）
-        sources = []
-        for doc in docs:
-            law_name = doc.metadata.get("source", "未知法律")
-            full_text = doc.page_content
-            articles = _extract_article_numbers(full_text)
-            article_label = "、".join(articles[:5])
-            if len(articles) > 5:
-                article_label += f" 等{len(articles)}条"
-            source_name = f"{law_name} {article_label}" if article_label else law_name
-            sources.append({
-                "source": source_name,
-                "content": full_text[:200].replace("\n", " ").strip(),
-                "full_content": full_text,
-            })
-        return sources
-
-
-def _inject_definitions(
-    expanded_docs: List[Document],
-    all_chunks: List[Document],
-    max_definitions: int = 3,
-) -> List[Document]:
-    """
-    将与当前上下文相关的定义类 chunk 注入。
-    扫描已展开文档中的法律术语，从全量 chunk 中查找对应的定义条文。
-    """
-    definitions_added = []
-    seen_content = {d.page_content[:100] for d in expanded_docs}
-
-    for chunk in all_chunks:
-        if len(definitions_added) >= max_definitions:
-            break
-        ent_str = chunk.metadata.get("entities", "")
-        if not ent_str:
-            continue
-        try:
-            entities = json.loads(ent_str)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not entities.get("is_definition"):
-            continue
-        term = entities.get("defined_term", "")
-        if not term or len(term) < 2:
-            continue
-        content_key = chunk.page_content[:100]
-        if content_key in seen_content:
-            continue
-        # 检查术语是否在已检索的 chunk 文本中出现
-        for doc in expanded_docs:
-            if term in doc.page_content:
-                definitions_added.append(chunk)
-                seen_content.add(content_key)
-                break
-
-    if definitions_added:
-        logger.info("[定义注入] 注入 %s 条定义条文", len(definitions_added))
-    return expanded_docs + definitions_added
-
-
-def _verify_citations(
-    sources: List[Dict[str, str]],
-    article_index: Dict,
-) -> List[Dict[str, str]]:
-    """
-    验证引用的法条条号是否真实存在，移除编造的条号。
-
-    法律在索引中但条号未找到时移除（防止 LLM 编造条号）。
-
-    Args:
-        sources: _format_sources() 返回的来源列表。
-        article_index: 条号索引 {law_name: {article_num(int): [chunks]}}。
-
-    Returns:
-        过滤后的来源列表。
-    """
-    if not article_index or not sources:
-        return sources
-
-    verified_sources = []
-
-    for src in sources:
-        label = src["source"]
-        # 拆分：法律名 + 条号部分
-        parts = label.split(" ", 1)
-        if len(parts) < 2:
-            verified_sources.append(src)
-            continue
-
-        law_name = parts[0]
-        articles_str = parts[1]
-
-        # 提取条号列表
-        article_list = re.split(r"[、,]", articles_str)
-        article_list = [a.strip() for a in article_list if a.strip()]
-
-        # 检查该法律是否在索引中
-        if law_name not in article_index:
-            verified_sources.append(src)
-            continue
-
-        law_articles = article_index[law_name]
-        verified_articles = []
-        for art in article_list:
-            clean_art = re.sub(r"\s*等\d+条$", "", art)
-            # 尝试款级匹配
-            para_match = PARA_PATTERN.search(clean_art)
-            if para_match:
-                art_num = _chinese_num_to_int(para_match.group(1))
-                if art_num > 0 and art_num in law_articles:
-                    verified_articles.append(clean_art)
-            else:
-                art_match = ARTICLE_PATTERN.search(clean_art)
-                if art_match:
-                    art_num = _chinese_num_to_int(art_match.group(1))
-                    if art_num > 0 and art_num in law_articles:
-                        verified_articles.append(clean_art)
-                else:
-                    verified_articles.append(art)
-
-        if verified_articles:
-            new_label = f"{law_name} {'、'.join(verified_articles)}"
-        else:
-            # 所有条号都被移除 → 该法律引用无效，跳过
-            continue
-
-        verified_sources.append({**src, "source": new_label})
-
-    return verified_sources
-
-
-def _verify_citations_semantic(
-    sources: List[Dict[str, str]],
-    article_index: Dict,
-    answer: str = "",
-    reranked_docs: Optional[List] = None,
-    enable_semantic: bool = False,
-) -> List[Dict[str, str]]:
-    """
-    引用校验增强版：结构验证 + 语义溯源。
-
-    enable_semantic=False 时执行结构验证（移除不存在的条号）。
-    enable_semantic=True 时先结构验证再语义验证（移除 low 置信度引用）。
-    """
-    # 始终先做结构验证
-    sources = _verify_citations(sources, article_index)
-
-    if not enable_semantic or not answer:
-        return sources
-
-    # 语义验证：标注 confidence，移除 low 级别引用
-    from app.citation_verifier import CitationVerifier
-    verifier = CitationVerifier(article_index)
-    sources = verifier.verify_citations(sources, answer)
-
-    # 移除 low 置信度引用（语义不匹配，很可能是编造）
-    sources = [s for s in sources if s.get("confidence", "") != "low"]
-
-    # 遗漏检测（最多 3 条）
-    if reranked_docs:
-        missing = verifier.detect_missing_citations(answer, reranked_docs)
-        for m in missing[:3]:
-            sources.append({
-                "source": m["source"],
-                "content": m.get("content", ""),
-                "full_content": m.get("full_content", ""),
-                "confidence": "suggested",
-            })
-
-    return sources
-
 
 def build_rag_chain(
     vectorstore: VectorStore,
@@ -581,8 +335,8 @@ def build_rag_chain(
     """
     # 配置记忆压缩（全局，供 CompressedChatMessageHistory 读取）
     # 优先使用轻量 LLM 做摘要（低延迟、低成本），否则回退到主模型
-    global _compression_config
-    _compression_config = {
+    _compression_config.clear()
+    _compression_config.update({
         "llm": lightweight_llm or llm,
         "keep_recent_rounds": memory_keep_recent_rounds,
         "summary_trigger_rounds": memory_summary_trigger_rounds,
@@ -590,7 +344,7 @@ def build_rag_chain(
         "max_tokens": memory_history_max_tokens,
         "enable_summary": True,
         "debug": memory_compression_debug,
-    }
+    })
 
     retriever = vectorstore.as_retriever(search_kwargs={"k": vector_top_k})
     bm25_retriever = ChineseBM25Retriever(chunks)
@@ -628,6 +382,7 @@ def _retrieve_context(
     components: Dict,
     domain_override: Optional[str] = None,
     law_names_override: Optional[List[str]] = None,
+    simple_mode: bool = False,
 ) -> Dict[str, Any]:
     """
     执行步骤 ①-⑤：分类 → 重写 → 混合检索 → Rerank → 上下文扩展。
@@ -635,20 +390,13 @@ def _retrieve_context(
     Args:
         domain_override: 预设领域（跳过分类步骤）。
         law_names_override: 预设法律名称列表（跳过分类步骤）。
+        simple_mode: 简单查询模式，跳过 Rerank 精排以降低延迟。
 
     Returns:
         {"context_text": str, "domain": str, "question": str,
          "sources": [...], "reranked_docs": [...], "article_index": {...}}
     """
-    bm25_retriever: ChineseBM25Retriever = components.get("bm25_retriever")
     article_index: Dict = components.get("article_index", {})
-    reranker: Optional[CrossEncoderReranker] = components.get("reranker")
-    bm25_top_k = components.get("bm25_top_k", 10)
-    vector_top_k = components.get("vector_top_k", 10)
-    rerank_top_k = components.get("rerank_top_k", 20)
-    rerank_final_k = components.get("rerank_final_k", 5)
-    rrf_constant = components.get("rrf_constant", 60)
-    adjacent_range = components.get("adjacent_range", 1)
     enable_classification = components.get("enable_classification", True)
 
     timings = {}
@@ -686,100 +434,27 @@ def _retrieve_context(
 
     # ③ 混合检索（BM25 + 向量 + RRF）
     _t = time.perf_counter()
-    if law_names and hasattr(retriever, 'vectorstore'):
-        filtered_retriever = retriever.vectorstore.as_retriever(
-            search_kwargs={"k": vector_top_k, "filter": {"source": {"$in": law_names}}}
-        )
-        vector_docs = filtered_retriever.invoke(contextualized_q)
-        all_vector_docs = retriever.invoke(contextualized_q)
-        seen_contents = {d.page_content[:200] for d in vector_docs}
-        for d in all_vector_docs:
-            if d.page_content[:200] not in seen_contents:
-                vector_docs.append(d)
-                seen_contents.add(d.page_content[:200])
-    else:
-        vector_docs = retriever.invoke(contextualized_q)
-
-    bm25_results = []
-    if bm25_retriever:
-        bm25_results = bm25_retriever.retrieve(
-            contextualized_q, k=bm25_top_k, law_filter=law_names if law_names else None
-        )
-        if law_names:
-            all_bm25 = bm25_retriever.retrieve(contextualized_q, k=bm25_top_k, law_filter=None)
-            seen_bm25 = {d.page_content[:200] for d, _ in bm25_results}
-            for d, s in all_bm25:
-                if d.page_content[:200] not in seen_bm25:
-                    bm25_results.append((d, s))
-                    seen_bm25.add(d.page_content[:200])
-
-    merged_docs = reciprocal_rank_fusion(
-        bm25_results, vector_docs, k=rerank_top_k, rrf_constant=rrf_constant
-    )
-    logger.info("[混合检索] BM25=%s + 向量=%s → RRF融合=%s", len(bm25_results), len(vector_docs), len(merged_docs))
-    if len(vector_docs) == 0:
-        logger.warning("[混合检索] 向量检索返回 0 条，可能是 Embedding API 响应异常或向量库未完整构建")
+    merged_docs, _retrieval_stats = hybrid_retrieve(retriever, contextualized_q, law_names, components)
     timings["retrieve"] = round((time.perf_counter() - _t) * 1000)
 
-    # ④ Rerank 精排
+    # ④ Rerank 精排（简单查询跳过，直接取 top-N）
     _t = time.perf_counter()
-    if reranker and merged_docs:
-        scored_reranked = reranker.rerank(contextualized_q, merged_docs, top_k=rerank_final_k)
-        reranked_docs = [doc for doc, _ in scored_reranked]
-        reranked_scores = [score for _, score in scored_reranked]
-        logger.info("[Rerank] %s → %s", len(merged_docs), len(reranked_docs))
-    else:
-        reranked_docs = merged_docs[:rerank_final_k]
-        reranked_scores = [0.0] * len(reranked_docs)
+    reranked_docs, reranked_scores = rerank_documents(
+        contextualized_q,
+        merged_docs,
+        components,
+        simple_mode=simple_mode,
+    )
     timings["rerank"] = round((time.perf_counter() - _t) * 1000)
 
     # ⑤ 法条上下文扩展（前后条 + 跨条引用）
     _t = time.perf_counter()
-    if components.get("enable_intelligent_expansion", False):
-        from app.expander import expand_context_with_agent
-        expansion_llm = components.get("expansion_llm") or components.get("lightweight_llm")
-        expanded_docs = expand_context_with_agent(
-            llm=expansion_llm,
-            query=contextualized_q,
-            reranked_docs=reranked_docs,
-            article_index=article_index,
-            all_chunks=components.get("chunks", []),
-            adjacent_range=adjacent_range,
-            expansion_depth=components.get("expansion_depth", 1),
-        )
-    else:
-        expanded_docs = list(reranked_docs)
-        if article_index and adjacent_range > 0:
-            for doc in reranked_docs:
-                law = doc.metadata.get("source", "")
-                int_str = doc.metadata.get("article_numbers_int", "")
-                if not law or not int_str:
-                    continue
-                try:
-                    article_nums = [int(x) for x in int_str.split(",") if x.strip()]
-                except ValueError:
-                    continue
-
-                ref_str = doc.metadata.get("referenced_articles", "")
-                if ref_str:
-                    for ref_art in ref_str.split(","):
-                        ref_art = ref_art.strip()
-                        if not ref_art:
-                            continue
-                        ref_match = ARTICLE_PATTERN.search(ref_art)
-                        if ref_match:
-                            ref_int = _chinese_num_to_int(ref_match.group(1))
-                            if ref_int > 0 and ref_int not in article_nums:
-                                article_nums.append(ref_int)
-
-                exclude = {d.page_content[:200] for d in expanded_docs}
-                adjacent = get_adjacent_articles(
-                    article_index, law, article_nums, n=adjacent_range, exclude_contents=exclude
-                )
-                expanded_docs.extend(adjacent)
-
-            if len(expanded_docs) > len(reranked_docs):
-                logger.info("[上下文扩展] %s → %s", len(reranked_docs), len(expanded_docs))
+    expanded_docs = expand_retrieved_context(
+        contextualized_q,
+        reranked_docs,
+        article_index,
+        components,
+    )
     timings["expand"] = round((time.perf_counter() - _t) * 1000)
 
     # ⑤.5 定义聚合
@@ -787,12 +462,28 @@ def _retrieve_context(
     if all_chunks:
         expanded_docs = _inject_definitions(expanded_docs, all_chunks)
 
+    # ⑤.6 司法解释按需补充。司法解释不进入主法条全量向量库，
+    # 但会在每次问题检索时读取少量相关文件，作为回答和案情分析依据。
+    interpretation_docs = _retrieve_interpretation_docs(
+        contextualized_q, domain, law_names, components
+    )
+    expanded_docs, reranked_docs, reranked_scores = merge_interpretation_docs(
+        expanded_docs,
+        reranked_docs,
+        reranked_scores,
+        interpretation_docs,
+    )
+
+    # ⑤.7 官方精选案例作为类案参考。法律法规和司法解释仍是主依据。
+    case_context = ""
+    try:
+        case_context = build_official_case_context(contextualized_q, domain, components)
+    except Exception as e:
+        logger.warning("[官方案例检索] 上下文注入失败: %s", e)
+
     # 构建上下文文本
-    context_parts = []
-    for i, doc in enumerate(expanded_docs, 1):
-        source = doc.metadata.get("source", "未知法律")
-        context_parts.append(f"[{i}] 来源：{source}\n{doc.page_content}")
-    context_text = "\n\n".join(context_parts)
+    context_text = build_context_text(expanded_docs, case_context)
+    logger.info("[上下文构建] docs=%d, chars=%d", len(expanded_docs), len(context_text))
 
     return {
         "context_text": context_text,
@@ -823,7 +514,8 @@ def ask(
     if components is None:
         components = {}
 
-    ctx = _retrieve_context(retriever, llm, question, session_id, components)
+    simple = _is_simple_query(question)
+    ctx = _retrieve_context(retriever, llm, question, session_id, components, simple_mode=simple)
 
     # ⑥ 生成答案
     config = {"configurable": {"session_id": session_id}}
@@ -834,36 +526,19 @@ def ask(
         config=config,
     )
 
-    # ⑦ 格式化来源 + 引用校验 + 风险提示
+    # ⑦ 后处理：引用校验 → 案例检索 → 案情状态
     answer_text = response.content if hasattr(response, "content") else str(response)
-    sources = _format_sources(ctx["reranked_docs"], answer=answer_text)
-    sources = _verify_citations_semantic(
-        sources, ctx["article_index"],
-        answer=answer_text,
-        reranked_docs=ctx["reranked_docs"],
-        enable_semantic=components.get("enable_semantic_verification", False),
+    post = _post_process_answer(
+        answer_text, ctx["reranked_docs"], ctx["article_index"],
+        question, ctx["domain"], components, skip_case_search=simple,
     )
-
-    # 案例检索（概览类问题跳过）
-    case_results = []
-    case_searcher = components.get("case_searcher")
-    if case_searcher and case_searcher.available and not _is_overview_question(question):
-        case_top_k = components.get("case_top_k", 3)
-        case_results = case_searcher.search(question, top_k=case_top_k, domain=ctx["domain"])
-
-    # 案情状态提取
-    lightweight_llm = components.get("lightweight_llm")
-    new_case_state = None
-    if lightweight_llm:
-        new_case_state = _extract_case_state(lightweight_llm, question, answer_text)
-
     return {
         "answer": answer_text,
-        "sources": sources,
+        "sources": post["sources"],
         "domain": ctx["domain"],
         "risk_warning": RISK_WARNING,
-        "case_results": case_results,
-        "case_state": new_case_state,
+        "case_results": post["case_results"],
+        "case_state": post["case_state"],
     }
 
 
@@ -902,7 +577,8 @@ async def ask_stream(
                 yield event
         else:
             # --- 原有快速路径 ---
-            ctx = _retrieve_context(retriever, llm, question, session_id, components)
+            simple = _is_simple_query(question)
+            ctx = _retrieve_context(retriever, llm, question, session_id, components, simple_mode=simple)
             yield {"type": "meta", "domain": ctx["domain"]}
 
             # emit substep events
@@ -925,49 +601,87 @@ async def ask_stream(
                 "case_state_context": case_state_text,
             }
 
+            # 流式输出前：并行启动案例检索（不依赖 answer_text）
+            import asyncio
+            case_future = None
+            if not simple:
+                case_future = asyncio.ensure_future(
+                    asyncio.to_thread(_search_cases, question, ctx["domain"], components)
+                )
+
             _t_gen = time.perf_counter()
             answer_parts = []
-            async for chunk in chain_with_history.astream(stream_input, config=config):
-                content = chunk.content if hasattr(chunk, "content") else str(chunk)
-                if content:
-                    answer_parts.append(content)
-                    yield {"type": "token", "content": content}
+            stream_start = asyncio.get_event_loop().time()
+            total_timeout = 180
+            token_timeout = 60
+            try:
+                logger.info("[流式生成] 开始，context=%d chars", len(ctx["context_text"]))
+                stream_iter = chain_with_history.astream(stream_input, config=config).__aiter__()
+                while True:
+                    elapsed = asyncio.get_event_loop().time() - stream_start
+                    remaining = total_timeout - elapsed
+                    if remaining <= 0:
+                        logger.warning("[流式生成] 总计 %ss 超时，中断", total_timeout)
+                        if answer_parts:
+                            break
+                        yield {"type": "error", "message": "回答生成超时，请简化问题后重试"}
+                        return
+                    try:
+                        chunk = await asyncio.wait_for(
+                            stream_iter.__anext__(),
+                            timeout=min(token_timeout, remaining),
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "[流式生成] %ss 无新 token，中断（已生成 %s 个 token）",
+                            token_timeout, len(answer_parts),
+                        )
+                        if answer_parts:
+                            break
+                        yield {"type": "error", "message": "回答生成超时，请简化问题后重试"}
+                        return
+                    content = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    if content:
+                        answer_parts.append(content)
+                        yield {"type": "token", "content": content}
+            except Exception as e:
+                logger.error("[流式生成] 异常: %s", e)
+                if not answer_parts:
+                    yield {"type": "error", "message": f"生成中断: {e}"}
+                    return
             gen_ms = round((time.perf_counter() - _t_gen) * 1000)
 
+            # token 结束后：引用校验（快，纯计算）
             answer_text = "".join(answer_parts)
-            sources = _format_sources(ctx["reranked_docs"], answer=answer_text)
-            sources = _verify_citations_semantic(
-                sources, ctx["article_index"],
-                answer=answer_text,
-                reranked_docs=ctx["reranked_docs"],
-                enable_semantic=components.get("enable_semantic_verification", False),
+            sources = _verify_sources(
+                answer_text, ctx["reranked_docs"], ctx["article_index"], components,
             )
+            # 等待案例检索完成
+            case_results = await case_future if case_future else []
 
-            # 案例检索（概览类问题跳过）
-            case_results = []
-            case_searcher = components.get("case_searcher")
-            if case_searcher and case_searcher.available and not _is_overview_question(question):
-                case_top_k = components.get("case_top_k", 3)
-                case_results = case_searcher.search(question, top_k=case_top_k, domain=ctx["domain"])
-
-            # 案情状态提取
-            lightweight_llm = components.get("lightweight_llm")
-            new_case_state = None
-            if lightweight_llm:
-                new_case_state = _extract_case_state(lightweight_llm, question, answer_text)
-
+            # 立即 yield sources_ready（法条 + 风险提示 + 案例，不再等案情提取）
             yield {
-                "type": "done",
+                "type": "sources_ready",
                 "sources": sources,
                 "risk_warning": RISK_WARNING,
                 "case_results": case_results,
+            }
+
+            # 案情状态提取（LLM 调用，最后完成）
+            new_case_state = await asyncio.to_thread(
+                _extract_case_state, components.get("lightweight_llm"), question, answer_text,
+            ) if components.get("lightweight_llm") else None
+
+            yield {
+                "type": "done",
                 "case_state": new_case_state,
                 "timings": {**ctx["timings"], "generate": gen_ms},
             }
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        yield {"type": "error", "message": str(e)}
+        logger.exception("[ask_stream] 流式查询失败")
+        yield {"type": "error", "message": "查询处理失败，请稍后重试"}
 
 
 async def _ask_stream_graph(
@@ -984,6 +698,10 @@ async def _ask_stream_graph(
     import asyncio
 
     graph_input = {"question": question, "session_id": session_id}
+    # 传递预计算的分类结果，避免图内重复分类
+    classify_result = components.get("_classify_result")
+    if classify_result:
+        graph_input["_classify_result"] = classify_result
     graph_result = None
     classify_data = None
     _graph_timings = {}
@@ -1085,6 +803,11 @@ async def _ask_stream_graph(
 
     import asyncio
     answer_parts = []
+
+    # 并行启动案例检索（不依赖 answer_text）
+    case_future = asyncio.ensure_future(
+        asyncio.to_thread(_search_cases, question, domain, components)
+    )
     stream_start = asyncio.get_event_loop().time()
     total_timeout = 180  # 整个流式生成最多 180s
     token_timeout = 60   # 首 token / 单 token 超时 60s
@@ -1128,458 +851,34 @@ async def _ask_stream_graph(
         AIMessage(content=answer_text),
     ])
 
-    # 格式化来源 + 引用校验
+    # 引用校验（快）+ 等待案例检索
     article_index = components.get("article_index", {})
-    sources = _format_sources(reranked_docs, answer=answer_text)
-    sources = _verify_citations_semantic(
-        sources, article_index,
-        answer=answer_text,
-        reranked_docs=reranked_docs,
-        enable_semantic=components.get("enable_semantic_verification", False),
-    )
+    sources = _verify_sources(answer_text, reranked_docs, article_index, components)
+    case_results = await case_future
 
-    # 案例检索（概览类问题跳过，领域与案例库不匹配时也跳过）
-    case_results = []
-    case_searcher = components.get("case_searcher")
-    if case_searcher and case_searcher.available and not _is_overview_question(question):
-        case_top_k = components.get("case_top_k", 3)
-        # 检查案例库是否覆盖当前领域
-        available_domains = components.get("case_available_domains", set())
-        if available_domains and domain and domain != "综合" and not any(
-            d in domain or domain in d for d in available_domains
-        ):
-            logger.info("[案例检索] 领域 '%s' 不在案例库覆盖范围 %s，跳过", domain, available_domains)
-        else:
-            case_results = case_searcher.search(question, top_k=case_top_k, domain=domain)
+    # 立即 yield sources_ready（法条 + 风险提示 + 案例）
+    yield {
+        "type": "sources_ready",
+        "sources": sources,
+        "risk_warning": RISK_WARNING,
+        "case_results": case_results,
+    }
 
-    # 案情状态提取
-    lightweight_llm = components.get("lightweight_llm")
-    new_case_state = None
-    if lightweight_llm:
-        new_case_state = _extract_case_state(lightweight_llm, question, answer_text)
+    # 案情状态提取（LLM 调用，最后完成）
+    new_case_state = await asyncio.to_thread(
+        _extract_case_state, components.get("lightweight_llm"), question, answer_text,
+    ) if components.get("lightweight_llm") else None
 
     yield {
         "type": "done",
-        "sources": sources,
-        "risk_warning": RISK_WARNING,
         "domain": domain,
         "multi_domain": is_multi,
-        "case_results": case_results,
         "case_state": new_case_state,
         "timings": _graph_timings,
     }
 
 
-async def ask_analysis_stream(
-    analysis_graph,
-    llm: BaseChatModel,
-    question: str,
-    session_id: str = "default",
-    components: Optional[Dict] = None,
-):
-    """
-    案情分析流式输出。使用 astream 实时推送每个图节点的进度。
-
-    Yields:
-        {"type": "meta", "intent": "analysis", "domain": str}  — 元信息
-        {"type": "substep", "step": str, ...}                  — 进度
-        {"type": "token", "content": str}                      — 逐 token 输出
-        {"type": "done", "sources": [...], ...}                — 结束信号
-        {"type": "error", "message": str}                      — 错误
-    """
-    if components is None:
-        components = {}
-
-    try:
-        yield {"type": "meta", "intent": "analysis", "domain": "综合"}
-
-        graph_input = {
-            "user_input": question,
-            "session_id": session_id,
-            "claims": [],
-            "claim_contexts": [],
-            "cross_analysis": "",
-            "time_nodes": [],
-            "report": "",
-            "sources": [],
-            "case_results": [],
-        }
-
-        # 使用 astream 实时获取每个节点的更新
-        graph_result = {}
-        all_claims = []
-        async for event in analysis_graph.astream(graph_input, stream_mode="updates"):
-            for node_name, update in event.items():
-                _t = time.perf_counter()
-                if node_name == "decompose":
-                    all_claims = update.get("claims", [])
-                    decompose_ms = round((time.perf_counter() - _t) * 1000)
-                    if not all_claims:
-                        yield {"type": "substep", "step": "decompose", "elapsed_ms": decompose_ms,
-                               "detail": "未提取到主张"}
-                        yield {"type": "error", "message": "未能从案情中提取到明确的法律主张，请补充更多细节。"}
-                        return
-                    yield {"type": "substep", "step": "decompose", "elapsed_ms": decompose_ms,
-                           "detail": f"提取 {len(all_claims)} 个主张"}
-                elif node_name == "retrieve_one_claim":
-                    ctx_items = update.get("claim_contexts", [])
-                    claim_name = ctx_items[0]["claim_text"][:20] if ctx_items else "?"
-                    yield {"type": "substep", "step": "retrieve", "elapsed_ms": round((time.perf_counter() - _t) * 1000),
-                           "detail": f"检索：{claim_name}..."}
-                elif node_name == "cross_analyze":
-                    yield {"type": "substep", "step": "cross_analyze",
-                           "elapsed_ms": round((time.perf_counter() - _t) * 1000),
-                           "detail": "交叉分析完成"}
-                elif node_name == "generate_report":
-                    graph_result = update
-
-        # 如果事件流中没拿到 generate_report 结果，用 ainvoke 获取
-        if not graph_result:
-            graph_result = await analysis_graph.ainvoke(graph_input)
-            all_claims = graph_result.get("claims", [])
-
-        report = graph_result.get("report", "")
-        sources = graph_result.get("sources", [])
-        case_results = graph_result.get("case_results", [])
-
-        if not report:
-            yield {"type": "error", "message": "报告生成失败。"}
-            return
-
-        # 流式输出报告
-        yield {"type": "substep", "step": "generate", "elapsed_ms": 0, "detail": "生成报告"}
-        _t_gen = time.perf_counter()
-        for line in report.split("\n"):
-            if line.strip():
-                yield {"type": "token", "content": line + "\n"}
-        gen_ms = round((time.perf_counter() - _t_gen) * 1000)
-
-        # 保存对话历史
-        from langchain_core.messages import HumanMessage, AIMessage
-        history_obj = _get_session_history(session_id)
-        history_obj.add_messages([
-            HumanMessage(content=question),
-            AIMessage(content=report),
-        ])
-
-        # 构建 case_state（含 claims 信息）
-        new_case_state = json.dumps({
-            "parties": [],
-            "dispute_type": all_claims[0].get("domain", "") if all_claims else "",
-            "key_facts": [c["claim_text"] for c in all_claims[:3]],
-            "stage": "案情分析",
-            "domain_history": list(set(c.get("domain", "") for c in all_claims if c.get("domain"))),
-            "claims": [{"claim_text": c["claim_text"], "domain": c.get("domain", ""), "verdict": ""} for c in all_claims],
-        }, ensure_ascii=False)
-
-        yield {
-            "type": "done",
-            "sources": sources,
-            "risk_warning": RISK_WARNING,
-            "domain": all_claims[0].get("domain", "综合") if all_claims else "综合",
-            "case_results": case_results,
-            "case_state": new_case_state,
-            "timings": {"generate": gen_ms},
-        }
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        yield {"type": "error", "message": f"案情分析出错: {e}"}
-
-
-async def ask_statute_stream(
-    llm: BaseChatModel,
-    question: str,
-    session_id: str = "default",
-    components: Optional[Dict] = None,
-):
-    """
-    诉讼时效独立问答。从用户描述中提取时间+判断类型，计算时效。
-
-    Yields:
-        同 ask_analysis_stream 的事件格式
-    """
-    from app.statute import (
-        calculate_statute, detect_statute_type, detect_time_references,
-        format_statute_table, STATUTE_LIMITS,
-    )
-
-    if components is None:
-        components = {}
-
-    try:
-        yield {"type": "meta", "intent": "statute", "domain": "综合"}
-
-        # Step 1: 用 LLM 提取时间节点和判断时效类型
-        yield {"type": "substep", "step": "decompose", "elapsed_ms": 0, "detail": "分析时效信息"}
-
-        type_list = "、".join(STATUTE_LIMITS.keys())
-        extract_prompt = f"""你是一位中国法律专家。请从以下描述中提取：
-1. 事件发生的日期（起算日期）
-2. 最可能适用的时效类型
-
-可选的时效类型：{type_list}
-
-用户描述：{question}
-
-请严格输出 JSON 格式：
-{{"incident_date": "YYYY-MM-DD", "statute_type": "类型名称", "summary": "简短摘要"}}
-
-如果无法确定日期，incident_date 输出 null。
-如果无法确定类型，statute_type 输出 null。"""
-
-        _t = time.perf_counter()
-        response = await llm.ainvoke(extract_prompt)
-        extract_ms = round((time.perf_counter() - _t) * 1000)
-        yield {"type": "substep", "step": "decompose", "elapsed_ms": extract_ms, "detail": "提取完成"}
-
-        raw = response.content if hasattr(response, "content") else str(response)
-        # 提取 JSON
-        json_match = re.search(r"\{[^}]+\}", raw)
-        if not json_match:
-            yield {"type": "error", "message": "无法解析时效信息，请提供更详细的案情描述（包括事件发生时间）。"}
-            return
-
-        try:
-            info = json.loads(json_match.group())
-        except json.JSONDecodeError:
-            yield {"type": "error", "message": "解析时效信息失败。"}
-            return
-
-        incident_date = info.get("incident_date")
-        statute_type = info.get("statute_type")
-
-        # 如果 LLM 没提取到类型，用规则推断
-        if not statute_type:
-            statute_type = detect_statute_type(question)
-
-        # 如果没提取到日期，尝试正则
-        if not incident_date:
-            times = detect_time_references(question)
-            if times:
-                incident_date = times[0]["parsed"]
-
-        if not incident_date:
-            yield {"type": "substep", "step": "calculate", "elapsed_ms": 0, "detail": "未找到时间信息"}
-            answer = _generate_general_statute_answer(statute_type, question)
-            yield {"type": "token", "content": answer}
-            _save_statute_history(session_id, question, answer)
-            yield {"type": "done", "sources": [], "risk_warning": RISK_WARNING, "domain": "综合"}
-            return
-
-        # Step 2: 计算时效
-        yield {"type": "substep", "step": "calculate", "elapsed_ms": 0, "detail": f"计算{statute_type or ''}时效"}
-
-        result = calculate_statute(incident_date, statute_type)
-        if not result:
-            yield {"type": "error", "message": f"无法计算时效：类型'{statute_type}'不支持或日期格式错误。"}
-            return
-
-        # Step 3: 生成回答
-        _t = time.perf_counter()
-        answer_lines = [
-            f"### 诉讼时效分析\n\n",
-            f"**事件日期：** {result.incident_date}\n\n",
-            f"**适用时效：** {result.period_display}（{result.legal_basis}）\n\n",
-            f"**截止日期：** {result.deadline_date}\n\n",
-            f"**当前状态：** {result.status_text}\n\n",
-        ]
-
-        if result.is_expired:
-            answer_lines.append(
-                f"您的案件已超过{result.statute_type}时效期间。"
-                f"但仍建议咨询专业律师，因为可能存在时效中断、中止等情形。\n\n"
-            )
-        elif result.remaining_days <= 30:
-            answer_lines.append(
-                f"时效即将届满，建议尽快采取法律行动"
-                f"（如申请仲裁或提起诉讼）以保护您的权益。\n\n"
-            )
-        else:
-            answer_lines.append(
-                f"目前仍在时效期间内，但建议尽早行动，"
-                f"避免因时间推移导致证据灭失或时效经过。\n\n"
-            )
-
-        answer_lines.append("*免责：以上为基于您提供信息的初步分析，以最新法律条文为准。*\n")
-
-        answer = "".join(answer_lines)
-        gen_ms = round((time.perf_counter() - _t) * 1000)
-        yield {"type": "substep", "step": "generate", "elapsed_ms": gen_ms, "detail": "生成回答"}
-
-        for line in answer.split("\n"):
-            if line.strip():
-                yield {"type": "token", "content": line + "\n"}
-
-        _save_statute_history(session_id, question, answer)
-        yield {"type": "done", "sources": [], "risk_warning": RISK_WARNING, "domain": "综合"}
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        yield {"type": "error", "message": f"时效分析出错: {e}"}
-
-
-def _generate_general_statute_answer(statute_type: Optional[str], question: str) -> str:
-    """无法确定日期时，给出一般性时效说明。"""
-    from app.statute import STATUTE_LIMITS as _LIMITS
-
-    lines = ["### 诉讼时效说明\n\n"]
-    if statute_type and statute_type in _LIMITS:
-        limit = _LIMITS[statute_type]
-        lines.append(f"根据您的描述，可能适用 **{limit.name}** 时效：\n\n")
-        lines.append(f"- **时效期间：** {limit.period_display}\n")
-        lines.append(f"- **法律依据：** {limit.legal_basis}\n\n")
-    else:
-        lines.append("根据您的描述，以下是常见时效期间：\n\n")
-        for name, limit in _LIMITS.items():
-            lines.append(f"- **{limit.name}：** {limit.period_display}（{limit.legal_basis}）\n")
-        lines.append("\n")
-
-    lines.append("请提供事件发生的具体日期，我可以帮您精确计算是否还在时效内。\n")
-    lines.append("\n*免责：以上为一般性法律知识介绍，不构成正式法律意见。*\n")
-    return "".join(lines)
-
-
-def _save_statute_history(session_id: str, question: str, answer: str):
-    """保存时效问答历史。"""
-    from langchain_core.messages import HumanMessage, AIMessage
-    history_obj = _get_session_history(session_id)
-    history_obj.add_messages([
-        HumanMessage(content=question),
-        AIMessage(content=answer),
-    ])
-
-
-async def ask_document_stream(
-    llm: BaseChatModel,
-    question: str,
-    session_id: str = "default",
-    components: Optional[Dict] = None,
-    document_type: Optional[str] = None,
-    case_state: Optional[Dict] = None,
-):
-    """
-    法律文书生成。从用户描述或 case_state 中提取字段，生成文书。
-
-    Args:
-        document_type: 指定文书类型（从 API 调用时传入）
-        case_state: 案情状态（从分析报告跳转时传入）
-
-    Yields:
-        同 ask_analysis_stream 的事件格式
-    """
-    from app.document_generator import (
-        DOCUMENT_TEMPLATES, render_document, get_available_types,
-        extract_fields_from_case_state,
-    )
-
-    if components is None:
-        components = {}
-
-    try:
-        yield {"type": "meta", "intent": "document", "domain": "综合"}
-
-        # 确定文书类型
-        if not document_type:
-            # 从用户描述中推断
-            for dtype, tmpl in DOCUMENT_TEMPLATES.items():
-                if tmpl.name in question or dtype in question:
-                    document_type = dtype
-                    break
-
-        if not document_type or document_type not in DOCUMENT_TEMPLATES:
-            # 无法确定类型，列出可选项
-            types = get_available_types()
-            type_list = "\n".join(f"- **{t['name']}**（{t['type']}）" for t in types)
-            answer = f"请指定要生成的文书类型：\n\n{type_list}\n\n例如：「帮我写一份劳动仲裁申请书」"
-            yield {"type": "token", "content": answer}
-            _save_document_history(session_id, question, answer)
-            yield {"type": "done", "sources": [], "risk_warning": RISK_WARNING, "domain": "综合"}
-            return
-
-        template = DOCUMENT_TEMPLATES[document_type]
-        yield {"type": "substep", "step": "decompose", "elapsed_ms": 0,
-               "detail": f"生成{template.name}"}
-
-        # 构建上下文
-        context_parts = []
-        if case_state:
-            case_context = extract_fields_from_case_state(case_state)
-            if case_context:
-                context_parts.append(case_context)
-
-        context_parts.append(f"用户描述：{question}")
-        context = "\n\n".join(context_parts)
-
-        # LLM 提取字段
-        _t = time.perf_counter()
-        prompt = template.extract_prompt.format(context=context[:4000])
-        response = await llm.ainvoke(prompt)
-        extract_ms = round((time.perf_counter() - _t) * 1000)
-        yield {"type": "substep", "step": "decompose", "elapsed_ms": extract_ms,
-               "detail": "字段提取完成"}
-
-        raw = response.content if hasattr(response, "content") else str(response)
-        # 提取 JSON
-        json_match = re.search(r"\{[\s\S]*\}", raw)
-        if not json_match:
-            yield {"type": "error", "message": f"{template.name}字段提取失败，请提供更详细的案情描述。"}
-            return
-
-        try:
-            fields = json.loads(json_match.group())
-        except json.JSONDecodeError:
-            yield {"type": "error", "message": "字段解析失败。"}
-            return
-
-        # 渲染文书
-        _t = time.perf_counter()
-        document = render_document(document_type, fields)
-        gen_ms = round((time.perf_counter() - _t) * 1000)
-        yield {"type": "substep", "step": "generate", "elapsed_ms": gen_ms,
-               "detail": f"{template.name}生成完成"}
-
-        # 流式输出
-        for line in document.split("\n"):
-            if line.strip():
-                yield {"type": "token", "content": line + "\n"}
-
-        _save_document_history(session_id, question, document)
-        yield {"type": "done", "sources": [], "risk_warning": RISK_WARNING, "domain": "综合"}
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        yield {"type": "error", "message": f"文书生成出错: {e}"}
-
-
-async def generate_document_from_api(
-    llm: BaseChatModel,
-    document_type: str,
-    case_state: Optional[Dict] = None,
-    extra_info: str = "",
-    session_id: str = "default",
-    components: Optional[Dict] = None,
-):
-    """
-    API 专用的文书生成函数。接收结构化输入，返回文书流。
-
-    与 ask_document_stream 的区别：不依赖 intent 检测，直接传入 doc_type。
-    """
-    question = extra_info or f"请生成{document_type}类型的法律文书"
-    async for event in ask_document_stream(
-        llm, question, session_id, components,
-        document_type=document_type, case_state=case_state,
-    ):
-        yield event
-
-
-def _save_document_history(session_id: str, question: str, answer: str):
-    """保存文书生成历史。"""
-    from langchain_core.messages import HumanMessage, AIMessage
-    history_obj = _get_session_history(session_id)
-    history_obj.add_messages([
-        HumanMessage(content=question),
-        AIMessage(content=answer),
-    ])
+# --- 以下为已提取到独立模块的函数，保留导出兼容 ---
+# ask_analysis_stream → app.analysis_chain
+# ask_statute_stream  → app.statute_chain
+# ask_document_stream → app.document_chain

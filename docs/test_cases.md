@@ -91,7 +91,7 @@
 **问题：** 公司高管挪用了员工的工资款，员工该怎么维权？能追究刑事责任吗？
 **预期领域：** 劳动、刑事
 **相关法律：** 劳动合同法、刑法
-**说明：** 劳动方面追讨工资，刑事方面挪用资金罪
+**说明：** 主领域应为劳动，核心诉求是追讨工资/劳动报酬；刑事作为副领域，结合事实判断可能涉及挪用资金、职务侵占或拒不支付劳动报酬等线索。不得误判为合同。
 
 ### 2. 婚姻 + 网络与数据
 **问题：** 离婚诉讼中，配偶偷拍的聊天记录和开房记录能作为出轨证据吗？
@@ -286,20 +286,207 @@
 
 ---
 
+## 智能案情分析
+
+> 用户消息被分类为 `intent=analysis` 时，系统启动 LangGraph 多步推理图：
+> 案情拆解 → 并行检索（法律关系/证据/维权路径）→ 交叉分析 → 结构化报告。
+> 前端显示「案情分析」标签 + 「生成文书」下拉按钮。
+
+### 1. 劳动纠纷 — 违法辞退
+
+**问题：** 我在公司工作了三年，上个月公司以组织调整为由突然辞退我，没有提前通知也没有给补偿金，我该怎么维权？
+**预期意图：** analysis
+**验证要点：** 输出 4 部分报告（法律关系定性/主张分析/证据缺口/维权路径），报告中应提及劳动合同法相关条款
+
+### 2. 交通事故 — 人身损害
+
+**问题：** 我骑电动车被汽车撞了，交警认定对方全责，我住院花了两万多，对方只肯赔一万，我能起诉吗？需要准备什么证据？
+**预期意图：** analysis
+**验证要点：** 报告应包含赔偿主张分析、证据清单（医疗费票据/事故认定书/误工证明）、维权路径建议
+
+### 3. 合同纠纷 — 违约赔偿
+
+**问题：** 我跟装修公司签了合同约定两个月完工，结果拖了半年还没做完，质量也有问题，我能要求退款和赔偿吗？
+**预期意图：** analysis
+**验证要点：** 报告应分析合同违约责任、可主张的赔偿范围、证据缺口（合同/付款凭证/沟通记录）
+
+### 4. 借款纠纷 — 民间借贷
+
+**问题：** 朋友找我借了十万块钱说好三个月还，现在快两年了一直推脱不还，也没有借条只有转账记录，能打赢官司吗？
+**预期意图：** analysis
+**验证要点：** 报告应分析借贷关系认定、证据效力（转账记录/聊天记录）、诉讼时效
+
+---
+
+## 诉讼时效计算器
+
+> 用户消息被分类为 `intent=statute` 时，系统调用 LLM 提取时间节点 + 规则引擎计算时效。
+> 支持 5 种时效类型：劳动仲裁(1年)、普通民事(3年)、人身损害(3年)、产品质量(2年)、环境污染(3年)。
+> 输出包含：时效类型、起算日期、截止日期、剩余天数、是否过期。
+
+### 1. 劳动仲裁 — 在时效内
+
+**问题：** 我今年3月被公司辞退，现在8月了，还能申请劳动仲裁吗？
+**预期意图：** statute
+**验证要点：** 识别为劳动仲裁（1年时效），输出"还在时效内"，显示剩余天数
+
+### 2. 劳动仲裁 — 已过期
+
+**问题：** 我2023年1月被公司拖欠工资，到现在还没要回来，还能仲裁吗？
+**预期意图：** statute
+**验证要点：** 识别为劳动仲裁（1年时效），输出"已过期"，显示已超期天数
+
+### 3. 普通民事 — 借款时效
+
+**问题：** 朋友2022年6月借了我五万块，约定一年还，到现在都没还，诉讼时效过了吗？
+**预期意图：** statute
+**验证要点：** 识别为普通民事（3年时效），从约定还款日起算，显示时效状态
+
+### 4. 人身损害 — 交通事故
+
+**问题：** 我去年出了交通事故受伤，对方一直拖着不赔，还来得及起诉吗？
+**预期意图：** statute
+**验证要点：** 识别为人身损害（3年时效），结合案情时间给出明确结论
+
+### 5. 通用时效咨询
+
+**问题：** 诉讼时效是多久？过了时效还能起诉吗？
+**预期意图：** statute
+**验证要点：** 无具体日期时，给出各类时效的一般性说明
+
+---
+
+## 法律文书自动生成
+
+> 用户消息被分类为 `intent=document` 时，系统使用模板 + LLM 填充生成文书。
+> 支持 4 种文书：劳动仲裁申请书、民事起诉状、律师函、合同审查意见。
+> 文书以 Markdown 格式流式输出。
+
+### 1. 劳动仲裁申请书
+
+**问题：** 帮我写一份劳动仲裁申请书，我被公司违法辞退了，要求赔偿
+**预期意图：** document
+**验证要点：** 输出格式规范的劳动仲裁申请书，包含申请人/被申请人信息、仲裁请求、事实与理由
+
+### 2. 民事起诉状
+
+**问题：** 写一个民事起诉状，对方借了我十万块钱不还
+**预期意图：** document
+**验证要点：** 输出民事起诉状格式，包含原被告信息、诉讼请求、事实与理由
+
+### 3. 律师函
+
+**问题：** 帮我起草一份律师函，对方公司拖欠我们公司货款三十万
+**预期意图：** document
+**验证要点：** 输出律师函格式，包含委托人/对方信息、法律依据、催款要求、期限警告
+
+### 4. 合同审查意见
+
+**问题：** 帮我审查一下这份劳动合同，试用期六个月，工资只有正式员工的一半
+**预期意图：** document
+**验证要点：** 输出合同审查意见，标注违法条款（试用期工资不得低于80%）、风险点、修改建议
+
+---
+
+## 性能优化与降级
+
+> 以下用例验证 Phase 2 引入的性能优化：并行缓存、查询复杂度路由、流式降级。
+
+### 语义缓存命中
+
+**问题：** 试用期最长多久？
+**操作：** 连续发送两次相同问题
+**验证要点：**
+
+- 第二次请求日志出现 `[语义缓存] 精确命中`
+- 第二次响应明显更快（跳过 RAG 全链路）
+- 两次回答内容一致
+
+### 并行缓存超时
+
+**操作：** 首次提问（冷启动，缓存为空）
+**验证要点：**
+
+- 日志无 `缓存查找异常` 或 `缓存超时` 报错
+- 缓存查找不阻塞 RAG 链执行（两者并行）
+
+### 简单查询模式
+
+**问题：** 试用期最长多久？
+**验证要点：**
+
+- 日志出现 `简单查询模式，跳过精排`（无 `[Rerank]` 行）
+- 无案例检索日志
+- 响应延迟低于复杂问题
+
+### 复杂查询完整流程
+
+**问题：** 劳动仲裁时效和工伤认定时效有什么区别？分别怎么计算？
+**验证要点：**
+
+- 日志出现 `[Rerank]` 精排记录
+- 走完整 7 步流水线（分类→重写→检索→Rerank→扩展→生成→校验）
+- 如启用案例检索，日志出现案例匹配
+
+### 流式降级
+
+**操作：** 模拟流式接口异常（如后端 LLM 超时）
+**验证要点：**
+
+- 前端不显示空白或卡住，自动降级为非流式返回
+- 日志出现 `流式降级` 提示
+- 用户仍能获得完整回答
+
+### 前端状态持久化
+
+**操作：**
+
+1. 发送几条消息建立会话
+2. 刷新浏览器（F5）
+
+**验证要点：**
+
+- 刷新后会话 ID 不变
+- 历史消息仍显示（从 localStorage 恢复）
+- 切换会话后再刷新，能恢复到上次选中的会话
+
+---
+
 ## 测试方法
 
 ### 1. 流式接口测试
 
 ```bash
 # 测试双领域问题
-curl -N http://localhost:8080/api/chat/stream \
+curl -N http://localhost:9000/api/chat/stream \
   -H "Content-Type: application/json" \
   -d '{"question": "被人殴打成轻微伤，对方会被治安拘留还是判刑？", "session_id": "test"}'
 
 # 测试案例检索（刑事类）
-curl -N http://localhost:8080/api/chat/stream \
+curl -N http://localhost:9000/api/chat/stream \
   -H "Content-Type: application/json" \
   -d '{"question": "入室盗窃价值三万元财物，会被判几年？", "session_id": "test_case"}'
+
+# 测试案情分析
+curl -N http://localhost:9000/api/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "我在公司工作了三年，公司突然辞退我没有补偿，我该怎么维权？", "session_id": "test_analysis"}'
+
+# 测试诉讼时效
+curl -N http://localhost:9000/api/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "我今年3月被公司辞退，现在8月了，还能申请劳动仲裁吗？", "session_id": "test_statute"}'
+
+# 测试文书生成
+curl -N http://localhost:9000/api/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "帮我写一份劳动仲裁申请书，我被公司违法辞退了", "session_id": "test_document"}'
+
+# 测试反馈统计
+curl http://localhost:9000/api/feedback/stats
+
+# 测试差评列表
+curl http://localhost:9000/api/feedback/reviews?limit=10
 ```
 
 ### 2. Python 脚本测试（避免 Windows 编码问题）
@@ -313,7 +500,7 @@ body = json.dumps({
     "session_id": "test_3domain"
 }, ensure_ascii=False).encode("utf-8")
 
-req = urllib.request.Request("http://localhost:8080/api/chat/stream", data=body,
+req = urllib.request.Request("http://localhost:9000/api/chat/stream", data=body,
     headers={"Content-Type": "application/json"})
 resp = urllib.request.urlopen(req, timeout=120)
 
@@ -337,7 +524,7 @@ body = json.dumps({
     "session_id": "test_case"
 }, ensure_ascii=False).encode("utf-8")
 
-req = urllib.request.Request("http://localhost:8080/api/chat/stream", data=body,
+req = urllib.request.Request("http://localhost:9000/api/chat/stream", data=body,
     headers={"Content-Type": "application/json"})
 resp = urllib.request.urlopen(req, timeout=120)
 
@@ -358,18 +545,62 @@ for raw_line in resp:
         current_event = None
 ```
 
+```python
+# 测试案情分析
+import json, urllib.request
+
+body = json.dumps({
+    "question": "我在公司工作了三年，公司突然辞退我没有补偿，我该怎么维权？",
+    "session_id": "test_analysis"
+}, ensure_ascii=False).encode("utf-8")
+
+req = urllib.request.Request("http://localhost:9000/api/chat/stream", data=body,
+    headers={"Content-Type": "application/json"})
+resp = urllib.request.urlopen(req, timeout=180)
+
+current_event = None
+for raw_line in resp:
+    line = raw_line.decode("utf-8").strip()
+    if line.startswith("event: "):
+        current_event = line[7:]
+    elif line.startswith("data: ") and current_event:
+        data = json.loads(line[6:])
+        if current_event == "meta":
+            print(f"[意图] {data.get('intent', '?')}")
+        elif current_event == "done":
+            print(f"[分析完成] case_state: {'有' if data.get('case_state') else '无'}")
+        current_event = None
+```
+
+```python
+# 测试反馈统计 API
+import json, urllib.request
+
+req = urllib.request.Request("http://localhost:9000/api/feedback/stats")
+resp = urllib.request.urlopen(req, timeout=10)
+stats = json.loads(resp.read())
+print(f"反馈总数: {stats['total']}, 好评: {stats['positive']}, 差评: {stats['negative']}, 好评率: {stats['rate']*100:.1f}%")
+for d in stats.get('by_domain', []):
+    print(f"  {d['domain'] or '综合'}: {d['total']}条, 好评率 {d['positive']/d['total']*100:.1f}%")
+```
+
 ### 3. 观察服务日志
 
 | 日志标记 | 含义 |
 |----------|------|
 | `[分类]` | 单域分类结果（单域问题） |
 | `[多域分类]` | 多域分类结果及 `is_multi_domain` 标记 |
+| `[意图分类]` | 意图识别结果（qa/analysis/statute/document） |
 | `[sub_question]` | 为每个领域生成的子问题 |
 | `[retrieve_one_domain]` | 某个领域的并行检索完成 |
 | `[merge_contexts]` | 多域检索结果合并去重 |
 | `[混合检索]` | BM25 + 向量 RRF 融合结果数 |
 | `[Rerank]` | Rerank 精排前后数量 |
 | `[流式输出]` | LLM 流式回答开始 |
+| `[案情分析]` | 案情分析图执行进度 |
+| `[时效计算]` | 诉讼时效计算结果 |
+| `[文书生成]` | 法律文书生成开始 |
+| `[语义缓存]` | 缓存命中/未命中 |
 | `[案例库]` | 案例库加载状态（启动时） |
 | `SQLite 已加载` | FTS5 案例库就绪 |
 | `LanceDB 已加载` | 语义案例库就绪（首次启动显示"从 SQLite 构建中"） |
@@ -378,6 +609,8 @@ for raw_line in resp:
 ### 4. 前端验证
 
 打开 `http://localhost:5173`，发送问题后观察：
+
+**基础功能：**
 - 欢迎页显示 14 个领域选择卡片（点击自动发送对应问题）
 - 示例问题 8 条，点击直接发送
 - AI 消息头部显示领域标签（如 `刑事`、`劳动` `未成年人` `民事诉讼`）
@@ -385,3 +618,24 @@ for raw_line in resp:
 - 法条来源卡片包含多个法律的引用，法律名可点击跳转 flk.npc.gov.cn
 - **刑事类问题**回答末尾出现「相似案例参考」折叠卡片，展示案例摘要、法院说理
 - 侧边栏会话 hover 显示下载按钮，点击导出 Markdown 文件
+- 流式输出时消息头部显示各阶段耗时时间线（分类→检索→精排→扩展→生成）
+
+**案情分析：**
+- 发送案情分析类问题后，消息头部显示「案情分析」标签（琥珀色）
+- 分析报告包含 4 部分结构化内容
+- 报告下方出现「生成文书」下拉按钮（4 种文书可选）
+
+**诉讼时效：**
+- 发送时效类问题后，回答中包含时效计算结果表格
+- 表格显示时效类型、起算日期、截止日期、剩余天数、状态
+
+**法律文书：**
+- 发送文书生成类问题后，消息头部显示「法律文书」标签（绿色）
+- 输出格式规范的 Markdown 文书
+
+**用户反馈：**
+- 每条 AI 回答下方显示 👍/👎 按钮
+- 点击后显示"感谢反馈"文字
+- 侧边栏底部「反馈管理」按钮可切换到管理后台
+- 管理后台显示统计卡片（总数/有用/没用/好评率）+ 按领域统计表 + 差评审核列表
+- 差评记录可点击「修正回答」编辑修正
