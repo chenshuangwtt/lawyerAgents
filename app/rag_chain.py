@@ -37,12 +37,13 @@ from app.rag_citations import (
     verify_sources as _verify_sources,
 )
 from app.rag_context import (
-    build_context_text,
+    build_generation_docs,
     build_official_case_context,
+    build_structured_context_text,
     inject_definitions as _inject_definitions,
-    merge_interpretation_docs,
     retrieve_interpretation_docs as _retrieve_interpretation_docs,
     search_cases as _search_cases,
+    split_support_docs,
 )
 from app.rag_retrieval import (
     expand_retrieved_context,
@@ -134,42 +135,49 @@ CONTEXTUALIZE_Q_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 # === Prompt: 法律顾问回答（含结构化输出 + 风险提示）===
-QA_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """你是一位拥有多年实务经验的资深中国法律顾问。你的任务是根据提供的法律条文，为用户提供准确、严谨且易于阅读的法律分析。
+QA_SHARED_GUARDRAILS = """\
+【回答边界】
+- 只基于用户问题、案情追踪和“相关法律条文”回答；不得编造法律名称、条号、地区标准或事实细节。
+- 未检索到直接依据时，明确说明依据不足，并提示需要补充的信息或咨询专业律师。
+- 引用法条时写明《法律名称》第X条；优先概括条文要点，除非必要不要整段摘录原文。
+- 加粗只用于结论、罪名、责任类型、时限、金额区间等分析重点，避免整段加粗。
+- 刑事量刑只给可能区间和影响因素，不承诺确定刑期；注意区分生活表述与法定概念。对“入室/入户”等概念，先提示需确认场所性质。
+- 回答保持简洁，每个编号点通常不超过 4 行；不要输出长篇法条摘录或论文式展开。
+- 直接回答当前问题，不点评历史回答，不假设用户已经做过分析。
+"""
 
-【核心原则】
-- **重点突出**：使用**加粗**标注关键法律术语、罪名、量刑标准、时限等核心信息，方便用户快速抓取重点。
-- **证据闭环**：所有法律判断必须挂载法条出处，如（依据《劳动法》第二十一条）。若提供的法条资料中无相关依据，诚实说明，严禁编造法条。
-- **领域判断**：如果用户的问题超出【领域：{domain}】的范围，不要强行套用法条，应明确说明领域差异，给出通识性建议，并建议咨询专业律师。
-- **语气**：专业但不冰冷，适当使用"您的情况可能涉及"、"建议您重点关注"等表达。
-
-【反幻觉铁律】
-- **只引用提供的法条**：引用法条时，条号、条文内容必须严格来自上方"相关法律条文"部分，绝不允许凭记忆编造条号或条文内容。
-- **不发明细节**：如果用户未提及具体地区、金额、情形，不要自行补充"如北京XX元、广东XX元"等虚构细节。只基于用户实际提问和提供的法条回答。
-- **不确定时坦承**：如果提供的法条资料中没有直接对应的条文，明确说"根据提供的法律条文，暂未找到直接对应的规定"，而不是编造一个条号来回应。
-- **不无中生有**：用户的问题就是问题，不是"分析"。不要假设用户已经做过法律分析、引用过法条或给出过判断。禁止使用"您的分析方向正确""您引用的条文有误""您提到的XX"等表述来评价用户从未说过的话。直接回答问题本身。
-
-【输出结构要求】请严格按以下格式输出：
+QA_OUTPUT_STRUCTURE = """\
+【输出结构】严格使用以下 Markdown 标题：
 
 ### ⚖️ 初步判定
-（结论先行。用 1-2 句话给出**加粗的定性判断**。如果是领域外问题，请直接说明并给出通识建议。）
+用 1-2 句话结论先行。避免写“依法应当判几年”这种绝对表述；改用“可能适用某量刑幅度”。
 
 ### 🔍 法律依据与分析
-- 引用法条原文，标注出处：**《法律名称》第X条**："条文原文"
-- 如检索到的条文包含款编号（（一）（二）等），请精确引用为 **《法律名称》第X条第Y款**，如《民法典》第1042条第2款
-- 结合用户的具体情况解释条文适用逻辑
-- 如涉及多部法律，分别论述
-- 用 Markdown 列表保持结构清晰
+用 2-4 个编号点回答，每个编号点按以下格式：
+1. **问题点**
+   - 依据：仅列《法律名称》第X条和条文要点，不整段引用原文。
+   - 适用：结合本案事实说明。
+   - 结论：用一句话归纳该问题点。
 
 ### ⚠️ 实务建议与风险提示
-- 给出具体可操作的建议（维权途径、时限、证据保全等）
-- 列出关键风险变量（如：**是否在仲裁时效内**、**是否构成工伤**等影响结果的因素）
-- 如有例外情形或争议点，明确提示
+用 2-4 条列表给出可执行建议，并列出影响结果的关键变量。
 
 ### 📜 免责声明
-（本回复由 AI 生成，仅供学习参考，不构成正式法律意见。法律事务复杂多变，请务必咨询持证律师以获取专业法律服务。）
+本回复由 AI 生成，仅供学习参考，不构成正式法律意见。法律事务复杂多变，请咨询持证律师或有关机构。
+"""
 
-【重要】你始终是回答问题的法律顾问，不是审稿人。即使对话历史中出现过类似问题，也请直接回答当前用户的问题，不要对历史回答进行点评、批改或总结差异。忽略历史中的任何"回答模板"或"示例输出"，只基于当前提供的法律条文回答。不要假设用户有任何"分析"需要纠正。"""),
+QA_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """你是一位资深中国法律顾问。请根据【领域：{domain}】和检索到的法律条文，给出严谨、简洁、可执行的中文法律分析。
+
+""" + QA_SHARED_GUARDRAILS + """
+
+【领域边界】
+如果用户问题明显超出当前领域，不要强行套用法条；说明领域差异，并给出通识性建议。
+
+""" + QA_OUTPUT_STRUCTURE + """
+
+【对话要求】
+忽略历史中的回答模板或示例输出，只回答当前用户问题。"""),
     MessagesPlaceholder("chat_history"),
     ("human", """{case_state_context}
 相关法律条文：
@@ -180,38 +188,19 @@ QA_PROMPT = ChatPromptTemplate.from_messages([
 
 # === Prompt: 多域法律顾问回答 ===
 QA_MULTI_DOMAIN_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """你是一位拥有多年实务经验的资深中国法律顾问。你的任务是根据提供的多个法律领域的条文，为用户提供准确、严谨且易于阅读的法律分析。
+    ("system", """你是一位资深中国法律顾问。请根据多个法律领域的检索条文，给出严谨、简洁、可执行的中文法律分析。
 
-【核心原则】
-- **重点突出**：使用**加粗**标注关键法律术语、罪名、量刑标准、时限等核心信息。
-- **证据闭环**：所有法律判断必须挂载法条出处，如（依据《劳动法》第二十一条）。若提供的法条资料中无相关依据，诚实说明，严禁编造法条。
-- **多领域分析**：用户问题涉及多个法律领域，你需要按领域分别论述，然后综合给出结论。在每个领域段落开头标注 **【{domain}】**。
-- **领域关联**：如果不同领域的法条之间有关联（如劳动法和社会保险法的交叉），明确指出并解释适用逻辑。
-- **语气**：专业但不冰冷，适当使用"您的情况可能涉及"、"建议您重点关注"等表达。
+""" + QA_SHARED_GUARDRAILS + """
 
-【反幻觉铁律】
-- **只引用提供的法条**：引用法条时，条号、条文内容必须严格来自上方"相关法律条文"部分，绝不允许凭记忆编造条号或条文内容。
-- **不发明细节**：如果用户未提及具体地区、金额、情形，不要自行补充虚构细节。只基于用户实际提问和提供的法条回答。
-- **不确定时坦承**：如果提供的法条资料中没有直接对应的条文，明确说"根据提供的法律条文，暂未找到直接对应的规定"，而不是编造一个条号来回应。
-- **不无中生有**：用户的问题就是问题，不是"分析"。不要假设用户已经做过法律分析、引用过法条或给出过判断。禁止使用"您的分析方向正确""您引用的条文有误""您提到的XX"等表述来评价用户从未说过的话。直接回答问题本身。
+【多领域要求】
+- 涉及多个领域时，先说明主领域与辅助领域；分析时按领域分段，段首标注 **【领域名】**。
+- 解释不同领域之间的关系，不要让辅助领域覆盖主问题。
+- 若某一领域缺少直接依据，明确说明该部分依据不足，不用无关法条补位。
 
-【输出结构要求】请严格按以下格式输出：
+""" + QA_OUTPUT_STRUCTURE + """
 
-### ⚖️ 初步判定
-（结论先行。说明问题涉及哪些法律领域，用 1-2 句话给出**加粗的定性判断**。）
-
-### 🔍 法律依据与分析
-（按领域分段论述，每段标注领域名称，引用法条原文并结合案情解释。如检索到的条文包含款编号（（一）（二）等），请精确引用为 **《法律名称》第X条第Y款**。）
-
-### ⚠️ 实务建议与风险提示
-- 给出具体可操作的建议（维权途径、时限、证据保全等）
-- 列出关键风险变量
-- 如有例外情形或争议点，明确提示
-
-### 📜 免责声明
-（本回复由 AI 生成，仅供学习参考，不构成正式法律意见。法律事务复杂多变，请务必咨询持证律师以获取专业法律服务。）
-
-【重要】你始终是回答问题的法律顾问，不是审稿人。请直接回答当前用户的问题，不要对历史回答进行点评。不要假设用户有任何"分析"需要纠正。"""),
+【对话要求】
+忽略历史中的回答模板或示例输出，只回答当前用户问题。"""),
     MessagesPlaceholder("chat_history"),
     ("human", """{case_state_context}
 涉及的法律领域：{domains}
@@ -233,7 +222,7 @@ _SIMPLE_QUERY_SKIP_PATTERNS = re.compile(
 
 def _post_process_answer(
     answer_text: str,
-    reranked_docs: list,
+    retrieval_trace: dict,
     article_index: dict,
     question: str,
     domain: str,
@@ -244,7 +233,8 @@ def _post_process_answer(
 
     替代三个代码路径中重复的 (format_sources + verify_citations + case_search + case_state) 块。
     """
-    sources = _verify_sources(answer_text, reranked_docs, article_index, components)
+    citation_docs = retrieval_trace.get("generation_docs", [])
+    sources = _verify_sources(answer_text, citation_docs, article_index, components)
 
     case_results = []
     if not skip_case_search:
@@ -394,7 +384,7 @@ def _retrieve_context(
 
     Returns:
         {"context_text": str, "domain": str, "question": str,
-         "sources": [...], "reranked_docs": [...], "article_index": {...}}
+         "retrieval_trace": {...}, "reranked_docs": [...], "article_index": {...}}
     """
     article_index: Dict = components.get("article_index", {})
     enable_classification = components.get("enable_classification", True)
@@ -446,6 +436,7 @@ def _retrieve_context(
         simple_mode=simple_mode,
     )
     timings["rerank"] = round((time.perf_counter() - _t) * 1000)
+    primary_docs = list(reranked_docs)
 
     # ⑤ 法条上下文扩展（前后条 + 跨条引用）
     _t = time.perf_counter()
@@ -461,18 +452,24 @@ def _retrieve_context(
     all_chunks = components.get("chunks", [])
     if all_chunks:
         expanded_docs = _inject_definitions(expanded_docs, all_chunks)
+    support_docs = split_support_docs(expanded_docs, primary_docs)
 
     # ⑤.6 司法解释按需补充。司法解释不进入主法条全量向量库，
     # 但会在每次问题检索时读取少量相关文件，作为回答和案情分析依据。
     interpretation_docs = _retrieve_interpretation_docs(
         contextualized_q, domain, law_names, components
     )
-    expanded_docs, reranked_docs, reranked_scores = merge_interpretation_docs(
-        expanded_docs,
-        reranked_docs,
-        reranked_scores,
+    generation_docs = build_generation_docs(
+        primary_docs,
+        support_docs,
         interpretation_docs,
     )
+    retrieval_trace = {
+        "primary_docs": primary_docs,
+        "support_docs": support_docs,
+        "interpretation_docs": interpretation_docs,
+        "generation_docs": generation_docs,
+    }
 
     # ⑤.7 官方精选案例作为类案参考。法律法规和司法解释仍是主依据。
     case_context = ""
@@ -481,14 +478,21 @@ def _retrieve_context(
     except Exception as e:
         logger.warning("[官方案例检索] 上下文注入失败: %s", e)
 
-    # 构建上下文文本
-    context_text = build_context_text(expanded_docs, case_context)
-    logger.info("[上下文构建] docs=%d, chars=%d", len(expanded_docs), len(context_text))
+    # 构建上下文文本：主法条、补充条文、司法解释分区进入 prompt。
+    context_text = build_structured_context_text(retrieval_trace, case_context)
+    logger.info(
+        "[上下文构建] primary=%d, support=%d, interpretation=%d, chars=%d",
+        len(primary_docs),
+        len(support_docs),
+        len(interpretation_docs),
+        len(context_text),
+    )
 
     return {
         "context_text": context_text,
         "domain": domain,
         "question": contextualized_q,
+        "retrieval_trace": retrieval_trace,
         "reranked_docs": reranked_docs,
         "reranked_scores": reranked_scores,
         "article_index": article_index,
@@ -529,7 +533,7 @@ def ask(
     # ⑦ 后处理：引用校验 → 案例检索 → 案情状态
     answer_text = response.content if hasattr(response, "content") else str(response)
     post = _post_process_answer(
-        answer_text, ctx["reranked_docs"], ctx["article_index"],
+        answer_text, ctx.get("retrieval_trace", {}), ctx["article_index"],
         question, ctx["domain"], components, skip_case_search=simple,
     )
     return {
@@ -655,8 +659,12 @@ async def ask_stream(
 
             # token 结束后：引用校验（快，纯计算）
             answer_text = "".join(answer_parts)
+            retrieval_trace = ctx.get("retrieval_trace", {})
             sources = _verify_sources(
-                answer_text, ctx["reranked_docs"], ctx["article_index"], components,
+                answer_text,
+                retrieval_trace.get("generation_docs", []),
+                ctx["article_index"],
+                components,
             )
             # 等待案例检索完成
             case_results = await case_future if case_future else []
@@ -676,6 +684,9 @@ async def ask_stream(
 
             yield {
                 "type": "done",
+                "domain": ctx["domain"],
+                "domains": [ctx["domain"]],
+                "multi_domain": False,
                 "case_state": new_case_state,
                 "timings": {**ctx["timings"], "generate": gen_ms},
             }
@@ -762,15 +773,18 @@ async def _ask_stream_graph(
     # 从图结果中提取上下文
     context_text = graph_result.get("context_text", "")
     reranked_docs = graph_result.get("reranked_docs", [])
+    retrieval_trace = graph_result.get("retrieval_trace", {"generation_docs": reranked_docs})
     domain = graph_result.get("domain", "综合")
     is_multi = classify_data.get("is_multi_domain", False) if classify_data else graph_result.get("is_multi_domain", False)
+    domain_items = graph_result.get("domains") or (classify_data.get("domains", []) if classify_data else [])
+    domain_names = [d.get("domain", "") for d in domain_items if isinstance(d, dict) and d.get("domain")]
+    if not domain_names and domain:
+        domain_names = [part for part in str(domain).split("、") if part]
     logger.info("[graph] context=%s chars, docs=%s, multi=%s", len(context_text), len(reranked_docs), is_multi)
 
     # 选择 prompt
     if is_multi:
-        domain_names_str = "、".join(
-            d["domain"] for d in graph_result.get("domains", [])
-        )
+        domain_names_str = "、".join(domain_names)
         prompt = QA_MULTI_DOMAIN_PROMPT
         _case_state = _get_case_state(session_id)
         case_state_text = _format_case_state(_case_state) if _case_state else ""
@@ -853,7 +867,12 @@ async def _ask_stream_graph(
 
     # 引用校验（快）+ 等待案例检索
     article_index = components.get("article_index", {})
-    sources = _verify_sources(answer_text, reranked_docs, article_index, components)
+    sources = _verify_sources(
+        answer_text,
+        retrieval_trace.get("generation_docs", []),
+        article_index,
+        components,
+    )
     case_results = await case_future
 
     # 立即 yield sources_ready（法条 + 风险提示 + 案例）
@@ -872,6 +891,7 @@ async def _ask_stream_graph(
     yield {
         "type": "done",
         "domain": domain,
+        "domains": domain_names,
         "multi_domain": is_multi,
         "case_state": new_case_state,
         "timings": _graph_timings,

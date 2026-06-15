@@ -33,6 +33,7 @@ from app.chat_history import (
 from app.law_registry import load_domain_colors, load_registry
 from app.rag_chain import ask, ask_stream
 from app.core import RISK_WARNING
+from app.rag_citations import repair_cached_sources
 from app.sanitizer import sanitize_input, sanitize_input_enriched
 from app.middleware import RateLimitMiddleware, APIKeyMiddleware, MetricsMiddleware, metrics
 from app.service_context import AppContext
@@ -336,6 +337,7 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="输入包含不允许的内容")
     request.question = sanitization.sanitized_text or ""
     ctx = get_app_context()
+    components = ctx.rag_components or {}
     if ctx.rag_chain is None or ctx.retriever is None or ctx.llm is None:
         raise HTTPException(
             status_code=503,
@@ -355,21 +357,32 @@ async def chat(request: ChatRequest):
             cached = None
 
         if cached:
+            cached_case_results = (
+                cached.get("case_results", [])
+                if components.get("enable_case_retrieval", False)
+                else []
+            )
+            cached_sources = repair_cached_sources(
+                cached.get("sources", []),
+                cached.get("answer", ""),
+                components.get("article_index", {}),
+                components,
+            )
             record_id = save_record(
                 session_id=request.session_id,
                 question=request.question,
                 answer=cached["answer"],
-                sources=cached["sources"],
+                sources=cached_sources,
                 domain=cached.get("domain", "综合"),
             )
             return ChatResponse(
                 id=record_id,
                 session_id=request.session_id,
                 answer=cached["answer"],
-                sources=[SourceItem(**s) for s in cached["sources"]],
+                sources=[SourceItem(**s) for s in cached_sources],
                 domain=cached.get("domain", "综合"),
                 risk_warning="本回答由 AI 生成，仅供参考，不构成正式法律意见。",
-                case_results=cached.get("case_results", []),
+                case_results=cached_case_results,
             )
 
     # 缓存未命中，执行 RAG
@@ -466,21 +479,32 @@ async def chat_stream(request: ChatRequest):
                     logger.warning("[语义缓存] 查找异常: %s", e)
                 cached = None
             if cached:
+                cached_case_results = (
+                    cached.get("case_results", [])
+                    if components.get("enable_case_retrieval", False)
+                    else []
+                )
+                cached_sources = repair_cached_sources(
+                    cached.get("sources", []),
+                    cached.get("answer", ""),
+                    components.get("article_index", {}),
+                    components,
+                )
                 record_id = save_record(
                     session_id=request.session_id,
                     question=request.question,
                     answer=cached["answer"],
-                    sources=cached["sources"],
+                    sources=cached_sources,
                     domain=cached.get("domain", "综合"),
                 )
                 yield {"type": "meta", "domain": cached.get("domain", "综合"), "cached": True}
                 yield {"type": "token", "content": cached["answer"]}
                 yield {
                     "type": "done",
-                    "sources": cached["sources"],
+                    "sources": cached_sources,
                     "risk_warning": RISK_WARNING,
                     "domain": cached.get("domain", "综合"),
-                    "case_results": cached.get("case_results", []),
+                    "case_results": cached_case_results,
                     "cached": True,
                     "_record_id": record_id,
                 }

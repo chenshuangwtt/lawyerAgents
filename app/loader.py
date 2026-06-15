@@ -12,8 +12,7 @@
   8. 支持两种分割策略：'article'（按条，推荐）和 'fixed'（固定长度）。
 
 依赖库：
-  - langchain_core, langchain_community, langchain_text_splitters
-  - python-docx (Docx2txtLoader 依赖)
+  - langchain_core
 """
 
 import re
@@ -25,8 +24,8 @@ from typing import List, Tuple, Dict, Literal, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from langchain_core.documents import Document
-from langchain_community.document_loaders import Docx2txtLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from app.docx_reader import read_docx_text
+from app.lightweight_text_splitter import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -296,13 +295,13 @@ def _split_by_articles(
     按"第X条"分割法律文本，保证每条独立。
     超长条内部会进一步按段落→句子→固定长度分割，并保留条号前缀。
     """
-    # 先用正则切割出每条及其内容
-    # 匹配从"第X条"到下一个"第X条"或文末
-    pattern = re.compile(
-        r'(第[一二三四五六七八九十百千万0-9]+条(?:之[一二三四五六七八九十]+)?)(.*?)(?=第[一二三四五六七八九十百千万0-9]+条(?:之[一二三四五六七八九十]+)?|$)',
-        re.DOTALL
+    heading_pattern = re.compile(
+        r'第[一二三四五六七八九十百千万0-9]+条(?:之[一二三四五六七八九十]+)?(?!的)'
     )
-    matches = list(pattern.finditer(text))
+    matches = [
+        match for match in heading_pattern.finditer(text)
+        if _looks_like_article_heading(text, match.start(), match.end())
+    ]
 
     if not matches:
         # 无任何条号，退化为普通分块
@@ -314,9 +313,10 @@ def _split_by_articles(
         return splitter.create_documents([text])
 
     article_docs = []
-    for match in matches:
-        article_num = match.group(1).strip()
-        article_body = match.group(2).strip()
+    for idx, match in enumerate(matches):
+        article_num = match.group(0).strip()
+        next_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        article_body = text[match.end():next_start].strip()
         full_article = f"{article_num}{article_body}"
         # 获取该条在原文中的起始位置（用于层级匹配）
         start_pos = match.start()
@@ -344,6 +344,22 @@ def _split_by_articles(
                 d.metadata["start_pos"] = start_pos
             article_docs.extend(subpara_docs)
     return article_docs
+
+
+def _looks_like_article_heading(text: str, start: int, end: int) -> bool:
+    """Return True when a 第X条 occurrence is likely an article heading.
+
+    Legal texts also contain cross references such as "依照本法第二百六十四条的规定".
+    Those must not become article chunk boundaries.
+    """
+    prev = text[start - 1] if start > 0 else ""
+    if prev and prev not in "\n\r 。；;：:！？!?）)":
+        return False
+
+    following = text[end:end + 3]
+    if following.startswith(("的", "规定", "款", "项")):
+        return False
+    return True
 
 
 def _merge_small_chunks(
@@ -526,12 +542,13 @@ def load_documents(
         raw_name = filepath.stem
         # 去除文件名末尾的日期（如 _20221228）
         law_name = raw_name.rsplit("_", 1)[0] if "_" in raw_name else raw_name
-        loader = Docx2txtLoader(str(filepath))
-        docs = loader.load()
-        for doc in docs:
-            doc.metadata["source"] = law_name
-            doc.metadata["file_path"] = str(filepath)
-        return docs
+        text = read_docx_text(filepath)
+        return [
+            Document(
+                page_content=text,
+                metadata={"source": law_name, "file_path": str(filepath)},
+            )
+        ]
 
     if parallel:
         with ThreadPoolExecutor() as executor:

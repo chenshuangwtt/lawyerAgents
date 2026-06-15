@@ -111,7 +111,12 @@ CASE_DOMAIN_KEYWORDS = {
         "刑事",
         "犯罪",
         "危险驾驶罪",
+        "盗窃",
         "盗窃罪",
+        "入户盗窃",
+        "入室盗窃",
+        "盗窃数额",
+        "数额巨大",
         "诈骗罪",
         "故意伤害罪",
         "故意伤害",
@@ -140,6 +145,12 @@ CASE_DOMAIN_KEYWORDS = {
         "治安管理处罚",
         "殴打",
         "伤害",
+        "赌博",
+        "聚众赌博",
+        "赌资",
+        "行政拘留",
+        "拘留",
+        "罚款",
         "报警",
         "公安机关",
         "派出所",
@@ -213,6 +224,7 @@ _QUERY_STOPWORDS = {
     "行政",
     "机关",
     "处罚",
+    "多少",
 }
 
 _BROAD_RELEVANCE_KEYWORDS = {
@@ -248,6 +260,20 @@ _FAMILY_VIOLENCE_STRONG_TERMS = [
 ]
 
 _POLICE_HANDLING_TERMS = ["报警", "公安", "公安机关", "派出所", "治安处罚", "治安管理处罚"]
+_GAMBLING_QUERY_TERMS = ["赌博", "聚众赌博", "赌钱", "赌资", "开设赌场", "小区赌博"]
+_GAMBLING_OFFENSE_TERMS = [
+    "赌博",
+    "聚众赌博",
+    "赌资",
+    "开设赌场",
+]
+_GAMBLING_CASE_STRONG_TERMS = [
+    *_GAMBLING_OFFENSE_TERMS,
+    "治安管理处罚",
+    "行政拘留",
+    "拘留",
+    "罚款",
+]
 _PROTECTION_ORDER_TERMS = ["人身安全保护令", "保护令", "申请保护令"]
 _JUVENILE_AGE_TERMS = ["14岁", "15岁", "16岁", "不满16周岁", "未满16周岁", "不满十八周岁", "未成年", "未成年人", "少年"]
 _FIGHTING_INJURY_TERMS = ["打架", "殴打", "伤害", "打伤", "重伤", "轻伤"]
@@ -263,6 +289,8 @@ _JUVENILE_INJURY_STRONG_TERMS = [
     "校园伤害",
     "学生伤害",
 ]
+_JUVENILE_INJURY_CORE_TERMS = ["故意伤害", "故意伤害罪", "重伤", "轻伤", "伤害", "打伤", "殴打"]
+_JUVENILE_LIABILITY_TERMS = ["未成年人", "未成年人犯罪", "刑事责任年龄"]
 _CAMPUS_INJURY_STRONG_TERMS = [
     "未成年人",
     "未成年",
@@ -274,10 +302,24 @@ _CAMPUS_INJURY_STRONG_TERMS = [
     "监护人责任",
     "家长赔偿",
 ]
+_CAMPUS_CONTEXT_TERMS = [
+    "校园伤害",
+    "学生伤害",
+    "学校责任",
+    "教育机构责任",
+    "教育管理职责",
+    "学校",
+    "在校",
+    "同学",
+    "学生",
+]
+_GUARDIAN_COMPENSATION_TERMS = ["监护人责任", "家长赔偿", "侵权责任", "人身损害赔偿", "学校责任", "教育机构责任"]
 _SELF_DEFENSE_QUERY_TERMS = ["正当防卫", "防卫", "反击", "被打", "被围殴", "被欺凌", "校园霸凌", "制止不法侵害"]
 _SELF_DEFENSE_CASE_TERMS = ["正当防卫", "防卫过当", "制止不法侵害"]
 _DANGEROUS_DRIVING_QUERY_TERMS = ["醉驾", "酒驾", "危险驾驶", "辅助驾驶", "自动驾驶", "机动车", "道路驾驶"]
 _DANGEROUS_DRIVING_CASE_TERMS = ["危险驾驶", "危险驾驶罪", "醉酒驾驶", "辅助驾驶", "机动车", "道路驾驶"]
+_THEFT_QUERY_TERMS = ["盗窃", "偷窃", "偷东西", "入户盗窃", "入室盗窃", "入户", "入室", "三万元", "3万元"]
+_THEFT_STRONG_TERMS = ["盗窃", "盗窃罪", "入户盗窃", "入室盗窃", "盗窃数额", "数额巨大", "盗窃公私财物"]
 
 
 class OfficialCaseSearcher:
@@ -285,9 +327,10 @@ class OfficialCaseSearcher:
 
     source_name = "official_cases"
 
-    def __init__(self, jsonl_path: str, top_k: int = 3):
+    def __init__(self, jsonl_path: str, top_k: int = 3, min_score: float = 10.0):
         self.jsonl_path = Path(jsonl_path)
         self.top_k = top_k
+        self.min_score = min_score
         self._cases: list[dict] = []
         self._available = False
         self._load()
@@ -364,6 +407,9 @@ class OfficialCaseSearcher:
         if any(term in text for term in _POLICE_HANDLING_TERMS):
             for term in ["报警", "公安机关", "派出所", "告诫书", "治安管理处罚"]:
                 add(term)
+        if any(term in text for term in _GAMBLING_QUERY_TERMS):
+            for term in ["赌博", "聚众赌博", "治安管理处罚", "行政拘留", "罚款"]:
+                add(term)
         if any(term in text for term in _JUVENILE_AGE_TERMS):
             for term in ["未成年人", "刑事责任年龄", "未成年人犯罪"]:
                 add(term)
@@ -394,7 +440,10 @@ class OfficialCaseSearcher:
         secondary_domains = []
         special_topic = ""
 
-        if any(term in query_text for term in _FAMILY_VIOLENCE_PRIMARY_TERMS):
+        if any(term in query_text for term in _GAMBLING_QUERY_TERMS):
+            primary_domain = "治安"
+            special_topic = "赌博治安处罚"
+        elif any(term in query_text for term in _FAMILY_VIOLENCE_PRIMARY_TERMS):
             primary_domain = "婚姻"
             special_topic = "家庭暴力" if any(term in query_text for term in ["家暴", "家庭暴力", "人身安全保护令", "保护令"]) else ""
         elif (
@@ -428,6 +477,8 @@ class OfficialCaseSearcher:
                     secondary_domains.append(key)
         if any(term in query_text for term in _POLICE_HANDLING_TERMS) and "治安" != primary_domain and "治安" not in secondary_domains:
             secondary_domains.append("治安")
+        if any(term in query_text for term in ["拘留", "罚款", "行政处罚"]) and "行政" != primary_domain and "行政" not in secondary_domains:
+            secondary_domains.append("行政")
         if any(term in query_text for term in _PROTECTION_ORDER_TERMS) and "民事诉讼" != primary_domain and "民事诉讼" not in secondary_domains:
             secondary_domains.append("民事诉讼")
         if any(term in query_text for term in ["赔偿", "家长", "监护人"]) and "侵权" != primary_domain and "侵权" not in secondary_domains:
@@ -488,6 +539,23 @@ class OfficialCaseSearcher:
             add("劳动合同")
         if "危险" in words and "驾驶" in words:
             add("危险驾驶")
+        if any(term in query for term in _GAMBLING_QUERY_TERMS):
+            add("赌博")
+            add("聚众赌博")
+            add("治安管理处罚")
+            if "拘留" in query:
+                add("行政拘留")
+            if "罚款" in query:
+                add("罚款")
+        if any(term in query for term in _THEFT_QUERY_TERMS):
+            add("盗窃")
+            add("盗窃罪")
+            if "入户" in query or "入室" in query:
+                add("入户盗窃")
+                add("入室盗窃")
+            if any(term in query for term in ["三万元", "3万元", "数额巨大"]):
+                add("盗窃数额")
+                add("数额巨大")
         if any(term in query for term in _JUVENILE_AGE_TERMS):
             add("未成年人")
             add("刑事责任年龄")
@@ -549,15 +617,31 @@ class OfficialCaseSearcher:
             term in query for term in _DANGEROUS_DRIVING_QUERY_TERMS
         ):
             return True
+        if special_topic == "赌博治安处罚" or any(term in query for term in _GAMBLING_QUERY_TERMS):
+            return any(term in case_text for term in _GAMBLING_OFFENSE_TERMS)
+        if any(term in query for term in _THEFT_QUERY_TERMS):
+            return any(term in case_text for term in _THEFT_STRONG_TERMS)
 
         if special_topic == "正当防卫":
             return any(term in case_text for term in _SELF_DEFENSE_CASE_TERMS)
         if primary_domain == "婚姻" and special_topic == "家庭暴力":
             return any(term in case_text for term in _FAMILY_VIOLENCE_STRONG_TERMS)
         if primary_domain == "刑事" and special_topic == "未成年人故意伤害 / 校园伤害":
-            return any(term in case_text for term in _JUVENILE_INJURY_STRONG_TERMS)
+            has_injury = any(term in case_text for term in _JUVENILE_INJURY_CORE_TERMS)
+            has_liability = any(term in case_text for term in _JUVENILE_LIABILITY_TERMS)
+            has_campus = any(term in case_text for term in _CAMPUS_CONTEXT_TERMS)
+            has_guardian = any(term in case_text for term in _GUARDIAN_COMPENSATION_TERMS)
+            query_has_campus = any(term in query for term in _SCHOOL_CONTEXT_TERMS)
+            query_has_guardian = any(term in query for term in ["家长", "监护人", "赔偿"])
+            if query_has_campus and not has_campus:
+                return False
+            if query_has_guardian and not (has_guardian or has_campus):
+                return False
+            return has_injury and (has_liability or has_campus)
         if special_topic == "校园伤害 / 教育机构责任":
-            return any(term in case_text for term in _CAMPUS_INJURY_STRONG_TERMS)
+            has_campus = any(term in case_text for term in _CAMPUS_CONTEXT_TERMS)
+            has_liability = any(term in case_text for term in _GUARDIAN_COMPENSATION_TERMS)
+            return has_campus and has_liability
 
         strong_core_hit = any(
             term in case_text
@@ -589,12 +673,13 @@ class OfficialCaseSearcher:
             if keyword not in _BROAD_RELEVANCE_KEYWORDS
         )
 
-    def _score_case(self, case: dict, terms: list[str], target_category: str) -> float:
+    def _score_case(self, case: dict, terms: list[str], target_category: str | set[str]) -> float:
         text = self._case_text(case)
         score = 0.0
-        if target_category and case.get("category") == target_category:
+        target_categories = {target_category} if isinstance(target_category, str) else set(target_category or [])
+        if target_categories and case.get("category") in target_categories:
             score += 8.0
-        elif target_category:
+        elif target_categories:
             score -= 2.0
         keywords = set(case.get("keywords") or [])
         for term in terms:
@@ -653,10 +738,15 @@ class OfficialCaseSearcher:
         terms = self.extract_legal_query_terms(query, primary_domain)
         terms = list(dict.fromkeys(terms + analysis["core_issue_terms"]))
         target_category = self._target_category(query, domain, primary_domain=primary_domain)
+        target_categories = {target_category} if target_category else set()
+        for secondary_domain in analysis["secondary_domains"]:
+            category = DOMAIN_TO_CASE_CATEGORY.get(secondary_domain, "")
+            if category:
+                target_categories.add(category)
         scored = []
         candidates = [
             case for case in self._cases
-            if not target_category or case.get("category") == target_category
+            if not target_categories or case.get("category") in target_categories
         ]
         for case in candidates:
             if not self.is_case_relevant(
@@ -668,10 +758,10 @@ class OfficialCaseSearcher:
                 special_topic=analysis["special_topic"],
             ):
                 continue
-            score = self._score_case(case, terms, target_category)
+            score = self._score_case(case, terms, target_categories)
             if case.get("case_level") == "指导性案例":
                 score += 0.5
-            if score > 0 or not terms:
+            if score >= self.min_score:
                 scored.append((score, case))
         scored.sort(key=lambda item: item[0], reverse=True)
         if not scored:

@@ -264,7 +264,7 @@ def test_criminal_query_keeps_dangerous_driving_case():
         shutil.rmtree(tmp_path.parent, ignore_errors=True)
 
 
-def test_juvenile_school_injury_filters_self_defense_and_dangerous_driving_cases():
+def test_juvenile_school_injury_requires_campus_specific_case():
     from app.official_case_loader import OfficialCaseSearcher
 
     tmp_path = _workspace_tmp_dir()
@@ -304,7 +304,39 @@ def test_juvenile_school_injury_filters_self_defense_and_dangerous_driving_cases
         assert analysis["special_topic"] == "未成年人故意伤害 / 校园伤害"
         assert "刑事责任年龄" in analysis["core_issue_terms"]
         assert "校园伤害" in analysis["core_issue_terms"]
-        assert [r["case_id"] for r in results] == ["injury-226"]
+        assert results == []
+    finally:
+        shutil.rmtree(tmp_path.parent, ignore_errors=True)
+
+
+def test_juvenile_school_injury_keeps_campus_specific_case():
+    from app.official_case_loader import OfficialCaseSearcher
+
+    tmp_path = _workspace_tmp_dir()
+    try:
+        jsonl = tmp_path / "official_cases.jsonl"
+        _write_jsonl(jsonl, [
+            _official_case(
+                "campus-1",
+                "参考案例：未成年学生校园伤害赔偿案",
+                "民事",
+                ["民事", "校园伤害", "学校责任", "监护人责任", "学生伤害"],
+                referee_points="未成年学生在校打伤同学的，应结合监护人责任、学校教育管理职责判断赔偿责任。",
+                basic_facts="未成年学生在学校与同学发生冲突并造成伤害。",
+            ),
+            _official_case(
+                "injury-226",
+                "指导性案例226号：陈某某、刘某某故意伤害、虐待案",
+                "刑事",
+                ["刑事", "故意伤害罪", "未成年人", "重伤"],
+                referee_points="未成年人实施故意伤害行为造成重伤的，应结合刑事责任年龄判断刑事责任。",
+            ),
+        ])
+        searcher = OfficialCaseSearcher(str(jsonl), top_k=3)
+        query = "15 岁少年在校打架把同学打成重伤，要负刑事责任吗？家长要赔偿吗？"
+        results = searcher.search(query, domain="刑事")
+
+        assert [r["case_id"] for r in results] == ["campus-1"]
     finally:
         shutil.rmtree(tmp_path.parent, ignore_errors=True)
 
@@ -329,6 +361,36 @@ def test_self_defense_case_kept_when_query_has_defense_facts():
 
         assert len(results) == 1
         assert results[0]["case_id"] == "defense-225"
+    finally:
+        shutil.rmtree(tmp_path.parent, ignore_errors=True)
+
+
+def test_theft_query_filters_unrelated_criminal_cases():
+    from app.official_case_loader import OfficialCaseSearcher
+
+    tmp_path = _workspace_tmp_dir()
+    try:
+        jsonl = tmp_path / "official_cases.jsonl"
+        _write_jsonl(jsonl, [
+            _official_case(
+                "injury-226",
+                "指导性案例226号：陈某某、刘某某故意伤害、虐待案",
+                "刑事",
+                ["刑事", "故意伤害罪", "未成年人", "重伤"],
+                referee_points="未成年人实施故意伤害行为造成重伤的，应结合刑事责任年龄判断刑事责任。",
+            ),
+            _official_case(
+                "theft-1",
+                "参考案例：入户盗窃案",
+                "刑事",
+                ["刑事", "盗窃罪", "入户盗窃", "数额巨大"],
+                referee_points="入户盗窃且盗窃数额巨大的，应结合退赃退赔等情节量刑。",
+            ),
+        ])
+        searcher = OfficialCaseSearcher(str(jsonl), top_k=3)
+        results = searcher.search("入室盗窃价值三万元财物，会被判几年？", domain="刑事")
+
+        assert [r["case_id"] for r in results] == ["theft-1"]
     finally:
         shutil.rmtree(tmp_path.parent, ignore_errors=True)
 
@@ -370,5 +432,66 @@ def test_administrative_query_keeps_procedure_case():
 
         assert len(results) == 1
         assert results[0]["case_id"] == "ad-1"
+    finally:
+        shutil.rmtree(tmp_path.parent, ignore_errors=True)
+
+
+def test_gambling_public_security_query_filters_generic_administrative_cases():
+    from app.official_case_loader import OfficialCaseSearcher
+
+    tmp_path = _workspace_tmp_dir()
+    try:
+        jsonl = tmp_path / "official_cases.jsonl"
+        _write_jsonl(jsonl, [
+            _official_case(
+                "ad-211",
+                "指导性案例211号：铜仁市万山区人民检察院诉铜仁市万山区林业局不履行林业行政管理职责行政公益诉讼案",
+                "行政",
+                ["行政", "行政公益诉讼", "林业行政管理", "行政处罚与刑罚衔接"],
+                referee_points="行政机关作出行政处罚决定，可以涉及罚款、履职、刑罚衔接等事项。",
+            ),
+            _official_case(
+                "ad-138",
+                "指导案例138号：陈德龙诉成都市成华区环境保护局环境行政处罚案",
+                "行政",
+                ["行政", "行政处罚", "环境保护"],
+                referee_points="环境行政处罚应依法作出，处罚类型可能包括罚款。",
+            ),
+        ])
+        searcher = OfficialCaseSearcher(str(jsonl), top_k=3)
+        query = "在小区聚众赌博被抓获，会被拘留多少天？罚款多少？"
+
+        assert searcher._analyze_case_query(query, "行政")["special_topic"] == "赌博治安处罚"
+        assert searcher.search(query, domain="行政") == []
+        assert searcher.search(query, domain="治安") == []
+    finally:
+        shutil.rmtree(tmp_path.parent, ignore_errors=True)
+
+
+def test_gambling_public_security_query_keeps_gambling_case_when_available():
+    from app.official_case_loader import OfficialCaseSearcher
+
+    tmp_path = _workspace_tmp_dir()
+    try:
+        jsonl = tmp_path / "official_cases.jsonl"
+        _write_jsonl(jsonl, [
+            _official_case(
+                "gambling-1",
+                "参考案例：聚众赌博治安处罚案",
+                "行政",
+                ["行政", "治安管理处罚", "聚众赌博", "行政拘留", "罚款"],
+                referee_points="参与聚众赌博的，应结合赌资、违法情节适用行政拘留、罚款等治安管理处罚。",
+            ),
+            _official_case(
+                "ad-211",
+                "指导性案例211号：林业行政公益诉讼案",
+                "行政",
+                ["行政", "行政公益诉讼", "林业行政管理"],
+            ),
+        ])
+        searcher = OfficialCaseSearcher(str(jsonl), top_k=3)
+        results = searcher.search("在小区聚众赌博被抓获，会被拘留多少天？罚款多少？", domain="行政")
+
+        assert [r["case_id"] for r in results] == ["gambling-1"]
     finally:
         shutil.rmtree(tmp_path.parent, ignore_errors=True)

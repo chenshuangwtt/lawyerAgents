@@ -51,6 +51,39 @@ _LABOR_PAY_TERMS = ["工资", "工资款", "薪资", "劳动报酬", "工资报�
 _LABOR_RELATION_TERMS = ["员工", "劳动者", "公司", "老板", "用人单位", "单位"]
 _PAY_MISAPPROPRIATION_TERMS = ["挪用", "侵占", "截留", "私吞", "扣发", "拖欠", "工资款"]
 _CRIMINAL_FOLLOWUP_TERMS = ["刑事责任", "追究刑事", "犯罪", "报案", "报警", "立案", "挪用资金", "职务侵占"]
+_TRADE_SECRET_TERMS = ["商业秘密", "客户名单", "客户资料", "竞争对手", "不正当竞争"]
+_WORK_INJURY_TERMS = ["工伤", "入职", "劳动关系", "公司拒绝赔偿", "遭遇工伤"]
+_PUBLIC_OFFICIAL_BRIBE_TERMS = ["政府官员", "官员", "行政执法人员", "执法人员", "公职人员"]
+_BRIBE_TERMS = ["受贿", "收受贿赂", "贿赂"]
+
+_DOCUMENT_ACTION_TERMS = [
+    "生成", "起草", "帮我写", "写一份", "写一个", "代书",
+    "生成文书", "写文书", "写申请书", "写起诉状", "写律师函",
+]
+_DOCUMENT_TYPE_TERMS = [
+    "申请书", "起诉状", "律师函", "法律文书", "文书模板", "申请书模板",
+    "起诉状模板", "劳动仲裁申请书", "仲裁申请书", "合同审查",
+]
+_EXPLICIT_ANALYSIS_TERMS = [
+    "分析案情", "案情分析", "帮我分析", "分析一下", "梳理案情",
+    "胜诉", "赢面", "证据缺口", "处理路径",
+]
+_CASE_WORKFLOW_TERMS = [
+    "怎么维权", "如何维权", "能告吗", "可以告吗", "怎么告",
+    "能起诉吗", "能仲裁吗", "能赔多少", "赔偿多少", "打官司",
+]
+_MULTI_DOMAIN_CUE_TERMS = [
+    "同时", "能否", "能不能", "是否", "还", "又", "并", "以及",
+    "怎么维权", "如何维权", "赔偿", "索赔", "起诉", "仲裁",
+    "报警", "追究", "刑事责任", "行政处罚", "消费者", "集体",
+    "家长", "学校", "员工", "公司",
+]
+_PERSONAL_CASE_TERMS = ["我", "本人", "我们", "我方", "家人", "朋友", "亲戚", "孩子"]
+_FACT_DETAIL_TERMS = [
+    "被辞退", "辞退我", "开除我", "拖欠", "没签", "未签", "住院",
+    "转账", "合同", "借条", "报警", "被打", "受伤", "工伤",
+    "上个月", "去年", "今年", "三年", "两年", "一个月", "万元", "元",
+]
 
 
 def _segment_text(text: str) -> List[str]:
@@ -97,7 +130,113 @@ def _adjust_domain_scores(question: str, scores: Dict[str, float]) -> Dict[str, 
         if has_criminal_followup:
             adjusted["刑事"] = max(adjusted.get("刑事", 0.0), 1.0)
 
+    if any(term in question for term in _TRADE_SECRET_TERMS):
+        adjusted["商事"] = max(
+            adjusted.get("商事", 0.0),
+            adjusted.get("民事诉讼", 0.0) + 0.2,
+            1.8,
+        )
+
+    if any(term in question for term in _WORK_INJURY_TERMS) and any(term in question for term in _LABOR_RELATION_TERMS):
+        adjusted["劳动"] = max(
+            adjusted.get("劳动", 0.0),
+            adjusted.get("未成年人", 0.0) + 0.2,
+            2.0,
+        )
+
+    if any(term in question for term in _PUBLIC_OFFICIAL_BRIBE_TERMS) and any(term in question for term in _BRIBE_TERMS):
+        adjusted["监察"] = max(
+            adjusted.get("监察", 0.0),
+            adjusted.get("税务", 0.0) + 0.2,
+            adjusted.get("刑事", 0.0) + 0.2,
+            2.0,
+        )
+
     return adjusted
+
+
+def _is_document_intent(question: str) -> bool:
+    """文书生成必须有明确写作动作或明确文书类型，避免把“申请仲裁”误判成文书。"""
+    configured = [
+        kw for kw in _STRONG_DOCUMENT_KEYWORDS
+        if kw not in {"仲裁", "劳动仲裁", "申请仲裁"}
+    ]
+    if any(term in question for term in configured):
+        return True
+    if any(term in question for term in _DOCUMENT_ACTION_TERMS):
+        return True
+    return any(term in question for term in _DOCUMENT_TYPE_TERMS)
+
+
+def _looks_like_personal_case(question: str) -> bool:
+    """判断是否像用户自己的具体案情，而不是泛化法律咨询题。"""
+    has_person = any(term in question for term in _PERSONAL_CASE_TERMS)
+    if not has_person:
+        return False
+    detail_hits = sum(1 for term in _FACT_DETAIL_TERMS if term in question)
+    return detail_hits >= 1
+
+
+def _is_analysis_intent(question: str) -> bool:
+    """案情分析入口收窄：显式分析请求，或个人具体案情 + 维权/诉讼路径请求。"""
+    if any(term in question for term in _EXPLICIT_ANALYSIS_TERMS):
+        return True
+    if any(term in question for term in _CASE_WORKFLOW_TERMS) and _looks_like_personal_case(question):
+        return True
+    return False
+
+
+def _parse_domain_names(raw: str, max_domains: int) -> List[str]:
+    """Parse LLM domain output into registry domain names, preserving order."""
+    normalized = (
+        raw.strip()
+        .replace("领域：", "")
+        .replace("领域:", "")
+        .replace("，", ",")
+        .replace("、", ",")
+        .replace("\n", ",")
+    )
+    domains: List[str] = []
+    for part in [p.strip() for p in normalized.split(",") if p.strip()]:
+        if part in DOMAIN_LAW_MAP and part not in domains:
+            domains.append(part)
+            continue
+        for domain, keywords in _DOMAIN_KEYWORDS.items():
+            if domain in domains:
+                continue
+            if domain in part or any(kw in part for kw in keywords):
+                domains.append(domain)
+                break
+        if len(domains) >= max_domains:
+            break
+    return domains[:max_domains]
+
+
+def _classify_domains_with_llm(llm: BaseChatModel, question: str, max_domains: int) -> List[str]:
+    messages = _MULTI_CLASSIFY_PROMPT.format_messages(question=question)
+    response = llm.invoke(messages)
+    raw = response.content if hasattr(response, "content") else str(response)
+    return _parse_domain_names(str(raw), max_domains)
+
+
+def _should_check_llm_for_secondary_domains(question: str, current_domains: List[str]) -> bool:
+    """High-confidence keyword primary should not suppress multi-domain questions."""
+    if len(current_domains) > 1:
+        return False
+    if len(question.strip()) < 18:
+        return False
+    question_marks = question.count("？") + question.count("?")
+    clause_marks = question.count("，") + question.count(",") + question.count("；") + question.count(";")
+    has_cue = any(term in question for term in _MULTI_DOMAIN_CUE_TERMS)
+    return question_marks >= 2 or (clause_marks >= 2 and has_cue) or (has_cue and len(question.strip()) >= 28)
+
+
+def _build_domain_items(domain_names: List[str]) -> List[Dict[str, List[str]]]:
+    return [
+        {"domain": domain, "law_names": DOMAIN_LAW_MAP.get(domain, []).copy()}
+        for domain in domain_names
+        if domain in DOMAIN_LAW_MAP
+    ]
 
 
 def classify_by_keywords(question: str) -> tuple:
@@ -155,25 +294,20 @@ def classify_intent(question: str, segments: List[str] = None) -> str:
         segments = _segment_text(q)
 
     has_statute_keyword = any(_keyword_hit(kw, segments, q) for kw in _STATUTE_KEYWORDS)
-    has_strong_document_keyword = any(kw in q for kw in _STRONG_DOCUMENT_KEYWORDS)
-    if has_strong_document_keyword:
+    if _is_document_intent(q):
         return "document"
-    if has_statute_keyword and not has_strong_document_keyword:
+    if has_statute_keyword:
         return "statute"
 
-    # 文书和时效关键词足够明确，不需要长度过滤
-    for kw in _DOCUMENT_KEYWORDS:
-        if _keyword_hit(kw, segments, q):
-            return "document"
+    # 时效关键词足够明确，不需要长度过滤
     for kw in _STATUTE_KEYWORDS:
         if _keyword_hit(kw, segments, q):
             return "statute"
     # jieba 分词后，短问题也能准确匹配（如"工伤怎么告"→ ["工伤","怎么","告"]）
     if len(segments) < 3:
         return "qa"
-    for kw in _ANALYSIS_KEYWORDS:
-        if _keyword_hit(kw, segments, q):
-            return "analysis"
+    if _is_analysis_intent(q):
+        return "analysis"
     return "qa"
 
 
@@ -289,12 +423,29 @@ def classify_question_multi(
         max_single = max(_WEIGHTED_KEYWORDS[top_domain].values())
         top_confidence = min(top_score / max_single, 1.0)
         if top_confidence >= 0.7:
-            domains = [{"domain": top_domain, "law_names": DOMAIN_LAW_MAP.get(top_domain, []).copy()}]
+            domain_names = [top_domain]
             for d, s in keyword_hits[1:max_domains]:
                 d_max = max(_WEIGHTED_KEYWORDS[d].values())
                 d_conf = min(s / d_max, 1.0)
                 if d_conf >= 0.5:
-                    domains.append({"domain": d, "law_names": DOMAIN_LAW_MAP.get(d, []).copy()})
+                    domain_names.append(d)
+            method = "keyword"
+            if _should_check_llm_for_secondary_domains(question, domain_names):
+                try:
+                    llm_domain_names = _classify_domains_with_llm(llm, question, max_domains)
+                    if llm_domain_names:
+                        merged_names = [top_domain]
+                        for d in llm_domain_names:
+                            if d not in merged_names and d != "综合":
+                                merged_names.append(d)
+                        for d in domain_names:
+                            if d not in merged_names and d != "综合":
+                                merged_names.append(d)
+                        domain_names = merged_names[:max_domains]
+                        method = "keyword+llm_multi"
+                except Exception as e:
+                    logger.debug("[多域分类-LLM补全] 失败，保留关键词结果: %s", e)
+            domains = _build_domain_items(domain_names)
             primary = domains[0]["domain"]
             is_multi = len(domains) > 1 and primary != "综合"
             logger.info("[多域分类-关键词] domains=%s, multi=%s", [d['domain'] for d in domains], is_multi)
@@ -303,7 +454,7 @@ def classify_question_multi(
                 "primary_domain": primary,
                 "is_multi_domain": is_multi,
                 "confidence": top_confidence,
-                "method": "keyword",
+                "method": method,
                 "intent": classify_intent(question, segments),
             }
 
@@ -314,20 +465,8 @@ def classify_question_multi(
         raw = response.content if hasattr(response, "content") else str(response)
         raw = raw.strip().replace("领域：", "").replace("领域:", "")
 
-        parts = [p.strip() for p in raw.split(",") if p.strip()]
-        domains = []
-        for part in parts[:max_domains]:
-            if part in DOMAIN_LAW_MAP:
-                domains.append({"domain": part, "law_names": DOMAIN_LAW_MAP[part].copy()})
-                continue
-            matched = False
-            for d, keywords in _DOMAIN_KEYWORDS.items():
-                if any(kw in part for kw in keywords):
-                    domains.append({"domain": d, "law_names": DOMAIN_LAW_MAP[d].copy()})
-                    matched = True
-                    break
-            if not matched and not domains:
-                domains.append({"domain": "综合", "law_names": []})
+        domain_names = _parse_domain_names(raw, max_domains)
+        domains = _build_domain_items(domain_names)
 
         if not domains:
             domains.append({"domain": "综合", "law_names": []})

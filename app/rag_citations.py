@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
+from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
 from app.core import PARA_PATTERN, _format_sources
-from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
 
 
 def verify_sources(
@@ -17,6 +17,9 @@ def verify_sources(
 ) -> list:
     """Format retrieved docs as sources and verify cited article numbers."""
     sources = _format_sources(reranked_docs, answer=answer_text)
+    sources = _add_verified_answer_citations(
+        sources, answer_text, article_index, components.get("chunks", [])
+    )
     return verify_citations_semantic(
         sources,
         article_index,
@@ -24,6 +27,168 @@ def verify_sources(
         reranked_docs=reranked_docs,
         enable_semantic=components.get("enable_semantic_verification", False),
     )
+
+
+def repair_cached_sources(
+    sources: List[Dict[str, str]],
+    answer_text: str,
+    article_index: dict,
+    components: dict | None = None,
+) -> List[Dict[str, str]]:
+    """Repair cached source cards with the current citation rules."""
+    repaired = _add_verified_answer_citations(
+        sources or [],
+        answer_text,
+        article_index or {},
+        (components or {}).get("chunks", []),
+    )
+    return verify_citations_semantic(
+        repaired,
+        article_index or {},
+        answer=answer_text,
+        reranked_docs=[],
+        enable_semantic=(components or {}).get("enable_semantic_verification", False),
+    )
+
+
+def _extract_law_article_citations(text: str) -> List[tuple[str, str]]:
+    seen = set()
+    result = []
+
+    def add(law_name: str, article: str) -> None:
+        article = re.sub(r"\s+", "", article or "")
+        if article and not article.startswith("第"):
+            article = f"第{article}"
+        item = (law_name.strip(), article)
+        if item[0] and item[1] and item not in seen:
+            seen.add(item)
+            result.append(item)
+
+    bracket_pattern = re.compile(
+        r"《([^》]+)》\s*"
+        r"(第?[（(]?[一二三四五六七八九十百千零\d]+[）)]?条"
+        r"(?:第[一二三四五六七八九十百千零\d]+款)?)"
+    )
+    for law_name, article in bracket_pattern.findall(text or ""):
+        add(law_name, article)
+
+    # 常见短写：刑法第二百六十四条 / 中华人民共和国刑法第264条。
+    bare_pattern = re.compile(
+        r"(中华人民共和国刑法|刑法)\s*"
+        r"(第?[（(]?[一二三四五六七八九十百千零\d]+[）)]?条"
+        r"(?:第[一二三四五六七八九十百千零\d]+款)?)"
+    )
+    for law_name, article in bare_pattern.findall(text or ""):
+        add(law_name, article)
+    return result
+
+
+def _law_name_matches(cited_law: str, indexed_law: str) -> bool:
+    cited = re.sub(r"\s+", "", cited_law or "")
+    indexed = re.sub(r"\s+", "", indexed_law or "")
+    if not cited or not indexed:
+        return False
+    return cited == indexed or cited.replace("中华人民共和国", "") == indexed.replace("中华人民共和国", "")
+
+
+def _article_number(article: str) -> int:
+    para_match = PARA_PATTERN.search(article or "")
+    if para_match:
+        return chinese_num_to_int(para_match.group(1))
+    art_match = ARTICLE_PATTERN.search(article or "")
+    if art_match:
+        return chinese_num_to_int(art_match.group(1))
+    return 0
+
+
+def _split_source_label(label: str) -> tuple[str, List[str]]:
+    parts = (label or "").split(" ", 1)
+    if len(parts) < 2:
+        return label or "", []
+    articles = [a.strip() for a in re.split(r"[、,]", parts[1]) if a.strip()]
+    return parts[0], articles
+
+
+def _add_verified_answer_citations(
+    sources: List[Dict[str, str]],
+    answer: str,
+    article_index: Dict,
+    chunks: Optional[List] = None,
+) -> List[Dict[str, str]]:
+    """Add answer-cited law articles that are validated by article_index.
+
+    Retrieval may return a judicial interpretation that mentions another law
+    article. If the answer cites that law explicitly and article_index verifies
+    it, keep the source card consistent with the answer instead of showing only
+    the interpretation.
+    """
+    if not answer:
+        return sources
+
+    entries: list[dict] = []
+    by_law: dict[str, dict] = {}
+    for src in sources:
+        law, articles = _split_source_label(src.get("source", ""))
+        entry = {"source": dict(src), "law": law, "articles": articles}
+        entries.append(entry)
+        if law and law not in by_law:
+            by_law[law] = entry
+
+    for cited_law, article in _extract_law_article_citations(answer):
+        article_num = _article_number(article)
+        if article_num <= 0:
+            continue
+        matched_law = next(
+            (
+                law
+                for law, articles in article_index.items()
+                if _law_name_matches(cited_law, law) and article_num in articles
+            ),
+            "",
+        )
+        if not matched_law and chunks:
+            matched_law = _find_law_article_in_chunks(cited_law, article_num, chunks)
+        if not matched_law:
+            continue
+        entry = by_law.get(matched_law)
+        if entry is None:
+            entry = {
+                "source": {"source": matched_law, "content": "", "full_content": ""},
+                "law": matched_law,
+                "articles": [],
+            }
+            entries.append(entry)
+            by_law[matched_law] = entry
+        if article not in entry["articles"]:
+            entry["articles"].append(article)
+
+    result = []
+    for entry in entries:
+        law = entry["law"]
+        articles = entry["articles"]
+        src = dict(entry["source"])
+        if law and articles:
+            src["source"] = f"{law} {'、'.join(articles)}"
+        result.append(src)
+    return result
+
+
+def _find_law_article_in_chunks(cited_law: str, article_num: int, chunks: List) -> str:
+    for doc in chunks or []:
+        law = doc.metadata.get("source", "")
+        if not _law_name_matches(cited_law, law):
+            continue
+        article = (doc.metadata.get("article") or "").strip()
+        if article and _article_number(article) == article_num:
+            return law
+        int_str = doc.metadata.get("article_numbers_int", "")
+        for num_str in str(int_str or "").split(","):
+            try:
+                if int(num_str) == article_num:
+                    return law
+            except ValueError:
+                continue
+    return ""
 
 
 def format_case_context(case_results: list) -> str:
@@ -95,13 +260,13 @@ def verify_citations(
             clean_art = re.sub(r"\s*等\d+条$", "", art)
             para_match = PARA_PATTERN.search(clean_art)
             if para_match:
-                art_num = _chinese_num_to_int(para_match.group(1))
+                art_num = chinese_num_to_int(para_match.group(1))
                 if art_num > 0 and art_num in law_articles:
                     verified_articles.append(clean_art)
             else:
                 art_match = ARTICLE_PATTERN.search(clean_art)
                 if art_match:
-                    art_num = _chinese_num_to_int(art_match.group(1))
+                    art_num = chinese_num_to_int(art_match.group(1))
                     if art_num > 0 and art_num in law_articles:
                         verified_articles.append(clean_art)
                 else:

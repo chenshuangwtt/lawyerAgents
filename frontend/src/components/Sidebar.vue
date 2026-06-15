@@ -7,10 +7,19 @@ const emit = defineEmits(['newSession', 'close', 'selectSession', 'switchView'])
 
 const sessions = ref([])
 
+function sortSessions(items) {
+  return [...(items || [])].sort((a, b) => {
+    if (Boolean(a.pinned) !== Boolean(b.pinned)) {
+      return Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))
+    }
+    return new Date(b.last_time || 0) - new Date(a.last_time || 0)
+  })
+}
+
 async function loadSessions() {
   try {
     const res = await getSessions()
-    sessions.value = res.items || []
+    sessions.value = sortSessions(res.items || [])
   } catch { /* ignore */ }
 }
 
@@ -44,6 +53,7 @@ async function onTogglePin(e, sid) {
     const res = await togglePinSession(sid)
     const s = sessions.value.find(s => s.session_id === sid)
     if (s) s.pinned = res.pinned
+    sessions.value = sortSessions(sessions.value)
   } catch { /* ignore */ }
 }
 

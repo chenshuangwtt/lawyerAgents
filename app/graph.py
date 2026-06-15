@@ -10,11 +10,12 @@ import logging
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from app.classifier import classify_question_multi
 from app.core import _get_session_history, invoke_with_timeout
 from app.rag_chain import _retrieve_context, _contextualize_query
+from app.rag_context import build_generation_docs, unique_docs
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +28,14 @@ class AgentState(TypedDict):
     sub_questions: Dict[str, str]
     retrieved_contexts: Annotated[list, operator.add]
     context_text: str
+    retrieval_trace: dict
     reranked_docs: list
     reranked_scores: list
     sources: list
     domain: str
     is_multi_domain: bool
     contextualized_question: str
+    _classify_result: NotRequired[dict]
 
 
 # 模块级引用，由 set_graph_components() 注入
@@ -104,12 +107,14 @@ def direct_retrieve(state: AgentState) -> dict:
         logger.error("direct_retrieve 失败: %s", e)
         return {
             "context_text": "",
+            "retrieval_trace": {},
             "reranked_docs": [],
             "reranked_scores": [],
             "contextualized_question": state["question"],
         }
     return {
         "context_text": ctx["context_text"],
+        "retrieval_trace": ctx.get("retrieval_trace", {}),
         "reranked_docs": ctx["reranked_docs"],
         "reranked_scores": ctx.get("reranked_scores", []),
         "contextualized_question": ctx["question"],
@@ -180,6 +185,7 @@ def retrieve_one_domain(state: dict) -> dict:
             "retrieved_contexts": [{
                 "domain": domain_name,
                 "context_text": "",
+                "retrieval_trace": {},
                 "reranked_docs": [],
                 "reranked_scores": [],
             }]
@@ -189,6 +195,7 @@ def retrieve_one_domain(state: dict) -> dict:
         "retrieved_contexts": [{
             "domain": domain_name,
             "context_text": ctx["context_text"],
+            "retrieval_trace": ctx.get("retrieval_trace", {}),
             "reranked_docs": ctx["reranked_docs"],
             "reranked_scores": ctx.get("reranked_scores", []),
         }]
@@ -198,6 +205,9 @@ def retrieve_one_domain(state: dict) -> dict:
 def _simple_merge(results):
     """简单合并：去重 + 拼接（默认行为）"""
     all_docs = []
+    all_primary_docs = []
+    all_support_docs = []
+    all_interpretation_docs = []
     seen = set()
     context_parts = []
     domain_names = []
@@ -211,9 +221,25 @@ def _simple_merge(results):
             if key not in seen:
                 seen.add(key)
                 all_docs.append(doc)
+        trace = r.get("retrieval_trace", {})
+        all_primary_docs.extend(trace.get("primary_docs", r.get("reranked_docs", [])))
+        all_support_docs.extend(trace.get("support_docs", []))
+        all_interpretation_docs.extend(trace.get("interpretation_docs", []))
+
+    merged_trace = {
+        "primary_docs": unique_docs(all_primary_docs),
+        "support_docs": unique_docs(all_support_docs),
+        "interpretation_docs": unique_docs(all_interpretation_docs),
+    }
+    merged_trace["generation_docs"] = build_generation_docs(
+        merged_trace["primary_docs"],
+        merged_trace["support_docs"],
+        merged_trace["interpretation_docs"],
+    )
 
     return {
         "context_text": "\n\n".join(context_parts),
+        "retrieval_trace": merged_trace,
         "reranked_docs": all_docs[:15],
         "domain": "、".join(domain_names),
     }
@@ -224,6 +250,9 @@ def _weighted_merge(results, domain_priority_order):
     priority_map = {name: 100 - i * 10 for i, name in enumerate(domain_priority_order)}
 
     all_scored_docs = []
+    all_primary_docs = []
+    all_support_docs = []
+    all_interpretation_docs = []
     seen = set()
     context_parts = []
     domain_names = []
@@ -245,12 +274,27 @@ def _weighted_merge(results, domain_priority_order):
             relevance = scores[i] if i < len(scores) else 0.0
             combined = relevance * 0.6 + domain_weight * 0.4
             all_scored_docs.append((doc, combined))
+        trace = r.get("retrieval_trace", {})
+        all_primary_docs.extend(trace.get("primary_docs", r.get("reranked_docs", [])))
+        all_support_docs.extend(trace.get("support_docs", []))
+        all_interpretation_docs.extend(trace.get("interpretation_docs", []))
 
     all_scored_docs.sort(key=lambda x: x[1], reverse=True)
     top_docs = [doc for doc, _ in all_scored_docs[:15]]
+    merged_trace = {
+        "primary_docs": unique_docs(all_primary_docs),
+        "support_docs": unique_docs(all_support_docs),
+        "interpretation_docs": unique_docs(all_interpretation_docs),
+    }
+    merged_trace["generation_docs"] = build_generation_docs(
+        merged_trace["primary_docs"],
+        merged_trace["support_docs"],
+        merged_trace["interpretation_docs"],
+    )
 
     return {
         "context_text": "\n\n".join(context_parts),
+        "retrieval_trace": merged_trace,
         "reranked_docs": top_docs,
         "domain": "、".join(domain_names),
     }

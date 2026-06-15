@@ -39,14 +39,14 @@ def _collect_candidates(
     # 跨条引用
     ref_str = doc.metadata.get("referenced_articles", "")
     if ref_str:
-        from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
+        from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
         for ref_art in ref_str.split(","):
             ref_art = ref_art.strip()
             if not ref_art:
                 continue
             ref_match = ARTICLE_PATTERN.search(ref_art)
             if ref_match:
-                ref_int = _chinese_num_to_int(ref_match.group(1))
+                ref_int = chinese_num_to_int(ref_match.group(1))
                 if ref_int > 0 and ref_int not in article_nums:
                     article_nums.append(ref_int)
 
@@ -184,7 +184,7 @@ def expand_context_with_agent(
 
 def _rule_based_expand(reranked_docs, article_index, all_chunks, adjacent_range):
     """纯规则拓展（与原有逻辑等价）。"""
-    from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
+    from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
 
     expanded_docs = list(reranked_docs)
     if article_index and adjacent_range > 0:
@@ -206,7 +206,7 @@ def _rule_based_expand(reranked_docs, article_index, all_chunks, adjacent_range)
                         continue
                     ref_match = ARTICLE_PATTERN.search(ref_art)
                     if ref_match:
-                        ref_int = _chinese_num_to_int(ref_match.group(1))
+                        ref_int = chinese_num_to_int(ref_match.group(1))
                         if ref_int > 0 and ref_int not in article_nums:
                             article_nums.append(ref_int)
 

@@ -9,23 +9,57 @@ import logging
 from typing import List, Dict, Optional
 from langchain_core.documents import Document
 
+from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
+
 logger = logging.getLogger(__name__)
 
 
 def _parse_article_numbers_str(text: str) -> List[int]:
     """从"第X条、第Y条"格式的字符串中提取整数条号列表。"""
-    from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
     nums = []
     for m in ARTICLE_PATTERN.finditer(text):
-        base = _chinese_num_to_int(m.group(1))
+        base = chinese_num_to_int(m.group(1))
         if base <= 0:
             continue
         sub = m.group(2)
         if sub:
-            nums.append(base * 10 + _chinese_num_to_int(sub))
+            nums.append(base * 10 + chinese_num_to_int(sub))
         else:
             nums.append(base)
     return nums
+
+
+def _looks_like_article_heading(text: str, start: int, end: int) -> bool:
+    prev = text[start - 1] if start > 0 else ""
+    if prev and prev not in "\n\r 。；;：:！？!?）)":
+        return False
+    following = text[end:end + 3]
+    return not following.startswith(("的", "规定", "款", "项"))
+
+
+def _heading_article_docs(chunk: Document) -> List[tuple[int, Document]]:
+    text = chunk.page_content or ""
+    matches = [
+        match for match in ARTICLE_PATTERN.finditer(text)
+        if _looks_like_article_heading(text, match.start(), match.end())
+    ]
+    result: List[tuple[int, Document]] = []
+    for idx, match in enumerate(matches):
+        base = chinese_num_to_int(match.group(1))
+        if base <= 0:
+            continue
+        sub = match.group(2)
+        num = base * 10 + chinese_num_to_int(sub) if sub else base
+        next_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        metadata = dict(chunk.metadata)
+        metadata["article"] = match.group(0)
+        metadata["article_numbers"] = match.group(0)
+        metadata["article_numbers_int"] = str(num)
+        result.append((
+            num,
+            Document(page_content=text[match.start():next_start].strip(), metadata=metadata),
+        ))
+    return result
 
 
 def build_article_index(chunks: List[Document]) -> Dict[str, Dict[int, List[Document]]]:
@@ -52,36 +86,42 @@ def build_article_index(chunks: List[Document]) -> Dict[str, Dict[int, List[Docu
         if not law_name:
             continue
 
-        nums = set()
+        heading_docs = _heading_article_docs(chunk)
+        if heading_docs:
+            if law_name not in index:
+                index[law_name] = {}
+            for num, article_doc in heading_docs:
+                if num not in index[law_name]:
+                    index[law_name][num] = []
+                index[law_name][num].append(article_doc)
+            continue
 
         # 1. 从 article 元数据取主条号（最可靠，每个 chunk 都有）
+        nums = set()
         article_meta = chunk.metadata.get("article", "")
         if article_meta:
             nums.update(_parse_article_numbers_str(article_meta))
 
-        # 2. 从 article_numbers 元数据取完整条号（合并后仍有效）
-        article_numbers_str = chunk.metadata.get("article_numbers", "")
-        if article_numbers_str:
-            nums.update(_parse_article_numbers_str(article_numbers_str))
+        # 2. 兜底兼容旧 fixed split 数据：仅在没有主条号/标题条号时使用旧字段。
+        if not nums:
+            article_numbers_str = chunk.metadata.get("article_numbers", "")
+            if article_numbers_str:
+                nums.update(_parse_article_numbers_str(article_numbers_str))
 
-        # 3. 从 article_numbers_int 元数据补充（旧字段，兜底）
-        int_str = chunk.metadata.get("article_numbers_int", "")
-        if int_str:
-            for num_str in int_str.split(","):
-                try:
-                    nums.add(int(num_str))
-                except ValueError:
-                    continue
+            int_str = chunk.metadata.get("article_numbers_int", "")
+            if int_str:
+                for num_str in int_str.split(","):
+                    try:
+                        nums.add(int(num_str))
+                    except ValueError:
+                        continue
 
         if not nums:
             continue
 
-        # 展开条号范围：如 [271, 275] → [271, 272, 273, 274, 275]
-        expanded = _expand_article_range(sorted(nums))
-
         if law_name not in index:
             index[law_name] = {}
-        for num in expanded:
+        for num in sorted(nums):
             if num not in index[law_name]:
                 index[law_name][num] = []
             index[law_name][num].append(chunk)

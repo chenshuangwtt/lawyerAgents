@@ -211,6 +211,9 @@ async function onSend() {
           if (data.document_result) msg.document_result = data.document_result
           if (data.missing_fields) msg.missing_fields = data.missing_fields
           if (data.cached) msg.cached = true
+          if (data.domain) msg.domain = data.domain
+          if (data.domains) msg.domains = data.domains
+          else if (data.domain && (!msg.domains || msg.domains.length === 0)) msg.domains = [data.domain]
           msg.streaming = false
         }
       },

@@ -13,11 +13,11 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import jieba
 from langchain_core.documents import Document
-from langchain_community.document_loaders import Docx2txtLoader
 
+from app.docx_reader import read_docx_text
 from app.hybrid_retriever import ChineseBM25Retriever
 from app.interpretation_library import JudicialInterpretationLibrary
-from app.loader import split_documents
+from app.interpretation_splitter import split_interpretation_documents
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,17 @@ _STOP_TERMS = {
     "关于", "审理", "适用", "法律", "问题", "解释", "规定", "案件",
     "一个", "现有", "完全", "相关",
 }
+
+_THEFT_QUERY_TERMS = {"盗窃", "偷窃", "偷东西", "入户盗窃", "入室盗窃", "入户", "入室"}
+_THEFT_INTERPRETATION_TERMS = {"盗窃", "盗窃罪", "入户盗窃", "入室盗窃", "盗窃公私财物"}
+
+
+def _is_theft_query(query: str) -> bool:
+    return any(term in (query or "") for term in _THEFT_QUERY_TERMS)
+
+
+def _has_theft_terms(text: str) -> bool:
+    return any(term in (text or "") for term in _THEFT_INTERPRETATION_TERMS)
 
 
 @dataclass(frozen=True)
@@ -201,6 +212,13 @@ class JudicialInterpretationSearcher:
                 scored.append((score, item))
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
+        if _is_theft_query(query):
+            theft_scored = [
+                (score, item) for score, item in scored
+                if _has_theft_terms(item.title) or bool(item.terms & _THEFT_INTERPRETATION_TERMS)
+            ]
+            if theft_scored:
+                scored = theft_scored
         return [item for _, item in scored[:self.candidate_file_count]]
 
     def _score_item(
@@ -252,17 +270,16 @@ class JudicialInterpretationSearcher:
 
         title = _clean_title(path)
         try:
-            docs = Docx2txtLoader(str(path)).load()
+            docs = [Document(page_content=read_docx_text(path), metadata={})]
             for doc in docs:
                 doc.metadata["source"] = title
                 doc.metadata["file_path"] = str(path)
                 doc.metadata["doc_type"] = "judicial_interpretation"
-            chunks = split_documents(
+            chunks = split_interpretation_documents(
                 docs,
                 chunk_size=self.chunk_size,
                 chunk_overlap=self.chunk_overlap,
                 min_chunk_size=120,
-                split_by="article",
             )
             for chunk in chunks:
                 chunk.metadata["source"] = title

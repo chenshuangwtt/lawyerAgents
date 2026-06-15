@@ -7,6 +7,7 @@ __pycache__/
 venv/
 .pytest_cache/
 .pytest_tmp/
+.pytest_tmp*/
 .pytest_work/
 .coverage
 .coverage.*
@@ -43,6 +44,10 @@ Thumbs.db
 
 # IDE
 .idea/
+.codegraph/
+
+# 评测运行输出
+eval/results.jsonl
 
 # 脚本
 _*.py

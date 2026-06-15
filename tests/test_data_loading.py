@@ -36,6 +36,52 @@ def test_discover_docx_files_excludes_large_data_dirs():
         shutil.rmtree(tmp_path.parent, ignore_errors=True)
 
 
+def test_loader_import_does_not_load_torch():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; "
+        "import app.loader; "
+        "print('torch' in sys.modules); "
+        "print('sentence_transformers' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path.cwd(),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip().splitlines() == ["False", "False"]
+
+
+def test_article_splitter_ignores_cross_reference_article_numbers():
+    from app.article_index import build_article_index
+    from app.loader import split_documents
+    from langchain_core.documents import Document
+
+    doc = Document(
+        page_content=(
+            "第一百九十六条有下列情形之一，进行信用卡诈骗活动。"
+            "盗窃信用卡并使用的，依照本法第二百六十四条的规定定罪处罚。"
+            "第一百九十七条使用伪造、变造的国库券进行诈骗活动。"
+            "第二百六十四条盗窃公私财物，数额较大的，或者多次盗窃、"
+            "入户盗窃的，处三年以下有期徒刑；数额巨大的，处三年以上十年以下有期徒刑。"
+        ),
+        metadata={"source": "中华人民共和国刑法"},
+    )
+
+    chunks = split_documents([doc], chunk_size=1000, chunk_overlap=100)
+    index = build_article_index(chunks)
+
+    article_264_chunks = index["中华人民共和国刑法"][264]
+    assert len(article_264_chunks) == 1
+    assert article_264_chunks[0].metadata["article"] == "第二百六十四条"
+    assert article_264_chunks[0].page_content.startswith("第二百六十四条盗窃公私财物")
+
+
 def test_data_hash_ignores_excluded_dirs():
     from app.vectorstore import _compute_data_hash
 

@@ -134,6 +134,7 @@ def main():
     components["enable_intelligent_expansion"] = settings.enable_intelligent_expansion
     components["expansion_depth"] = settings.expansion_depth
     components["enable_semantic_verification"] = settings.enable_semantic_verification
+    components["enable_case_retrieval"] = settings.enable_case_retrieval
 
     # 7.5.1 构建案情分析图
     from app.analysis_graph import set_analysis_components, build_analysis_graph
@@ -150,6 +151,7 @@ def main():
             case_searcher = OfficialCaseSearcher(
                 settings.official_case_processed_file,
                 top_k=settings.official_case_top_k,
+                min_score=settings.official_case_min_score,
             )
             if case_searcher.available:
                 components["case_searcher"] = case_searcher

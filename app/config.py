@@ -10,6 +10,14 @@ from app.storage_paths import get_app_db_path
 
 load_dotenv()
 
+# Hugging Face local model downloads should use the configured mirror by
+# default. Disable Xet so downloads do not bypass HF_ENDPOINT through the
+# separate Xet/CAS service, and remove the deprecated transfer flag to avoid
+# noisy warnings from huggingface_hub.
+os.environ.setdefault("HF_ENDPOINT", os.getenv("HF_ENDPOINT", "https://hf-mirror.com"))
+os.environ.setdefault("HF_HUB_DISABLE_XET", os.getenv("HF_HUB_DISABLE_XET", "1"))
+os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+
 
 @dataclass
 class Settings:
@@ -207,9 +215,9 @@ class Settings:
     )
 
     # --- 案例检索 ---
-    # 是否启用案例库检索：开启后在回答末尾展示相似案例
+    # 是否启用案例库检索：默认关闭。小规模官方案例库仅在高相关时作为可选参考展示。
     enable_case_retrieval: bool = field(
-        default_factory=lambda: os.getenv("ENABLE_CASE_RETRIEVAL", "true").lower() == "true"
+        default_factory=lambda: os.getenv("ENABLE_CASE_RETRIEVAL", "false").lower() == "true"
     )
     # 官方精选案例库：小规模、人工整理、默认参与主流程
     use_official_cases: bool = field(
@@ -233,6 +241,9 @@ class Settings:
     )
     official_case_top_k: int = field(
         default_factory=lambda: int(os.getenv("OFFICIAL_CASE_TOP_K", "3"))
+    )
+    official_case_min_score: float = field(
+        default_factory=lambda: float(os.getenv("OFFICIAL_CASE_MIN_SCORE", "10"))
     )
     legacy_case_top_k: int = field(
         default_factory=lambda: int(os.getenv("LEGACY_CASE_TOP_K", "0"))
@@ -358,7 +369,7 @@ class Settings:
         "enable_interpretation_retrieval", "interpretation_top_k",
         "interpretation_candidate_files",
         "enable_case_retrieval", "case_top_k",
-        "use_official_cases", "use_legacy_cases", "official_case_top_k", "legacy_case_top_k",
+        "use_official_cases", "use_legacy_cases", "official_case_top_k", "official_case_min_score", "legacy_case_top_k",
         "multi_domain_max_domains",
         "enable_semantic_cache", "semantic_cache_threshold",
         "enable_case_analysis", "analysis_max_claims", "analysis_retrieval_top_k",

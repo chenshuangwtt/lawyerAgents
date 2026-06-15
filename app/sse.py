@@ -81,6 +81,7 @@ def build_done_payload(event_payload: dict[str, Any]) -> dict[str, Any]:
     }
     for key in (
         "domain",
+        "domains",
         "multi_domain",
         "case_results",
         "case_state",

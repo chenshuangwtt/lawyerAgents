@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 from langchain_core.documents import Document
 
 from app.core import PARA_PATTERN, invoke_with_timeout
-from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
+from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
 
 
 # 置信度阈值（向量余弦相似度）
@@ -163,13 +163,13 @@ class CitationVerifier:
                 # 尝试款级匹配
                 para_match = PARA_PATTERN.search(clean_art)
                 if para_match:
-                    art_num = _chinese_num_to_int(para_match.group(1))
+                    art_num = chinese_num_to_int(para_match.group(1))
                     para_num_str = para_match.group(3)
                 else:
                     art_match = ARTICLE_PATTERN.search(clean_art)
                     if not art_match:
                         continue
-                    art_num = _chinese_num_to_int(art_match.group(1))
+                    art_num = chinese_num_to_int(art_match.group(1))
                     para_num_str = None
 
                 if art_num <= 0:
@@ -183,7 +183,7 @@ class CitationVerifier:
                 # 有款号时，优先找匹配款的 chunk
                 law_text = ""
                 if para_num_str:
-                    para_int = _chinese_num_to_int(para_num_str)
+                    para_int = chinese_num_to_int(para_num_str)
                     if para_int > 0:
                         chinese_digits = "零一二三四五六七八九"
                         if para_int < 10:
@@ -311,4 +311,3 @@ def _num_to_chinese(num: int) -> str:
             result += chinese_digits[ones]
         return result
     return str(num)
-

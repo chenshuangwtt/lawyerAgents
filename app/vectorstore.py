@@ -23,6 +23,8 @@ from langchain_chroma import Chroma
 
 logger = logging.getLogger(__name__)
 
+INDEX_SCHEMA_VERSION = "legal-article-split-v2"
+
 
 def _get_embedding_key(embeddings: Embeddings) -> str:
     """提取 Embedding 模型的唯一标识（模型名 + base_url），用于检测模型变更。"""
@@ -69,6 +71,7 @@ def _compute_data_hash(
             entries.append(f"{f.name}:{stat.st_size}:{stat.st_mtime}")
     if embedding_key:
         entries.append(f"__embedding__:{embedding_key}")
+    entries.append(f"__index_schema__:{INDEX_SCHEMA_VERSION}")
     return hashlib.md5("|".join(entries).encode()).hexdigest()
 
 

@@ -8,8 +8,8 @@ from typing import Dict, List, Tuple
 from langchain_core.documents import Document
 
 from app.article_index import get_adjacent_articles
+from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
 from app.hybrid_retriever import reciprocal_rank_fusion
-from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
 
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ def expand_retrieved_context(
                     continue
                 ref_match = ARTICLE_PATTERN.search(ref_art)
                 if ref_match:
-                    ref_int = _chinese_num_to_int(ref_match.group(1))
+                    ref_int = chinese_num_to_int(ref_match.group(1))
                     if ref_int > 0 and ref_int not in article_nums:
                         article_nums.append(ref_int)
 

@@ -41,34 +41,38 @@ def temp_db(monkeypatch):
 class TestSaveAndGetRecords:
     def test_save_and_retrieve(self):
         from app.chat_history import save_record, get_session_records
+        session_id = f"test-session-{uuid.uuid4().hex}"
         record_id = save_record(
-            session_id="test-session",
+            session_id=session_id,
             question="劳动法规定试用期多久？",
             answer="根据劳动合同法第19条...",
             sources=[{"content": "第19条", "source": "劳动合同法", "confidence": "high"}],
             domain="劳动",
         )
         assert record_id > 0
-        records = get_session_records("test-session")
+        records = get_session_records(session_id)
         assert len(records) == 1
         assert records[0]["question"] == "劳动法规定试用期多久？"
         assert records[0]["domain"] == "劳动"
 
     def test_multiple_records_ordered(self):
         from app.chat_history import save_record, get_session_records
-        save_record(session_id="s1", question="Q1", answer="A1", sources=[], domain="综合")
-        save_record(session_id="s1", question="Q2", answer="A2", sources=[], domain="综合")
-        save_record(session_id="s1", question="Q3", answer="A3", sources=[], domain="综合")
-        records = get_session_records("s1")
+        session_id = f"s1-{uuid.uuid4().hex}"
+        save_record(session_id=session_id, question="Q1", answer="A1", sources=[], domain="综合")
+        save_record(session_id=session_id, question="Q2", answer="A2", sources=[], domain="综合")
+        save_record(session_id=session_id, question="Q3", answer="A3", sources=[], domain="综合")
+        records = get_session_records(session_id)
         assert len(records) == 3
         assert [r["question"] for r in records] == ["Q1", "Q2", "Q3"]
 
     def test_different_sessions_isolated(self):
         from app.chat_history import save_record, get_session_records
-        save_record(session_id="s1", question="Q1", answer="A1", sources=[], domain="综合")
-        save_record(session_id="s2", question="Q2", answer="A2", sources=[], domain="综合")
-        assert len(get_session_records("s1")) == 1
-        assert len(get_session_records("s2")) == 1
+        sid1 = f"s1-{uuid.uuid4().hex}"
+        sid2 = f"s2-{uuid.uuid4().hex}"
+        save_record(session_id=sid1, question="Q1", answer="A1", sources=[], domain="综合")
+        save_record(session_id=sid2, question="Q2", answer="A2", sources=[], domain="综合")
+        assert len(get_session_records(sid1)) == 1
+        assert len(get_session_records(sid2)) == 1
 
     def test_empty_session(self):
         from app.chat_history import get_session_records
@@ -78,12 +82,14 @@ class TestSaveAndGetRecords:
 class TestSessions:
     def test_get_sessions(self):
         from app.chat_history import save_record, get_sessions
-        save_record(session_id="s1", question="问题一", answer="回答一", sources=[], domain="劳动")
-        save_record(session_id="s1", question="问题二", answer="回答二", sources=[], domain="劳动")
-        save_record(session_id="s2", question="问题三", answer="回答三", sources=[], domain="刑事")
+        sid1 = f"s1-{uuid.uuid4().hex}"
+        sid2 = f"s2-{uuid.uuid4().hex}"
+        save_record(session_id=sid1, question="问题一", answer="回答一", sources=[], domain="劳动")
+        save_record(session_id=sid1, question="问题二", answer="回答二", sources=[], domain="劳动")
+        save_record(session_id=sid2, question="问题三", answer="回答三", sources=[], domain="刑事")
         sessions = get_sessions()
         assert len(sessions) >= 2
-        s1 = next(s for s in sessions if s["session_id"] == "s1")
+        s1 = next(s for s in sessions if s["session_id"] == sid1)
         assert s1["msg_count"] == 2
 
     def test_delete_session(self):
@@ -148,12 +154,13 @@ class TestThreadSafety:
     def test_concurrent_saves(self):
         from app.chat_history import save_record, get_session_records
         errors = []
+        session_prefix = f"thread-{uuid.uuid4().hex}"
 
         def save_batch(batch_id):
             try:
                 for i in range(10):
                     save_record(
-                        session_id=f"thread-{batch_id}",
+                        session_id=f"{session_prefix}-{batch_id}",
                         question=f"Q{i}",
                         answer=f"A{i}",
                         sources=[],
@@ -170,5 +177,5 @@ class TestThreadSafety:
 
         assert errors == []
         for i in range(5):
-            records = get_session_records(f"thread-{i}")
+            records = get_session_records(f"{session_prefix}-{i}")
             assert len(records) == 10

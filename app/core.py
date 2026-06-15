@@ -4,11 +4,18 @@
 从 rag_chain.py 中提取，消除模块间对私有函数的跨文件导入。
 """
 
+import os
 import re
 import json
 import logging
 import threading
 from typing import List, Dict, Any, Optional
+
+# Keep Hugging Face downloads on the configured mirror and silence the
+# deprecated transfer flag before langchain/sentence-transformers imports.
+os.environ.setdefault("HF_ENDPOINT", os.getenv("HF_ENDPOINT", "https://hf-mirror.com"))
+os.environ.setdefault("HF_HUB_DISABLE_XET", os.getenv("HF_HUB_DISABLE_XET", "1"))
+os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.documents import Document
@@ -18,7 +25,6 @@ from langchain_core.chat_history import (
     InMemoryChatMessageHistory,
 )
 
-from app.loader import ARTICLE_PATTERN, _chinese_num_to_int
 from app.memory_compression import compress_messages
 
 logger = logging.getLogger(__name__)
@@ -196,6 +202,50 @@ def _extract_article_numbers(text: str) -> List[str]:
     return result
 
 
+def _extract_law_article_citations(text: str) -> List[tuple[str, str]]:
+    """提取回答中的“《法律名称》第X条”引用。"""
+    pattern = re.compile(
+        r"《([^》]+)》\s*"
+        r"(第[（(]?[一二三四五六七八九十百千零\d]+[）)]?条"
+        r"(?:第[一二三四五六七八九十百千零\d]+款)?)"
+    )
+    seen = set()
+    result = []
+    for law_name, article in pattern.findall(text or ""):
+        key = (law_name.strip(), article.strip())
+        if key not in seen:
+            seen.add(key)
+            result.append(key)
+    return result
+
+
+def _law_name_matches(cited_law: str, source_law: str) -> bool:
+    """匹配法名，支持“刑法”匹配“中华人民共和国刑法”，但不匹配长司法解释标题。"""
+    cited = re.sub(r"\s+", "", cited_law or "")
+    source = re.sub(r"\s+", "", source_law or "")
+    if not cited or not source:
+        return False
+    cited_short = cited.replace("中华人民共和国", "")
+    source_short = source.replace("中华人民共和国", "")
+    return (
+        cited == source
+        or cited_short == source_short
+    )
+
+
+def _doc_own_article_matches(doc, article: str) -> bool:
+    """Return True only when article is the chunk's own article heading.
+
+    metadata["article_numbers"] contains every "第X条" mentioned in the text.
+    Judicial interpretations often cite Criminal Law article numbers inside
+    their own clauses, so using article_numbers would attach 《刑法》条号 to the
+    interpretation title. metadata["article"] is the actual heading produced by
+    the article splitter and is safe for naked article fallback.
+    """
+    own_article = (doc.metadata.get("article") or "").strip()
+    return bool(own_article and own_article == article)
+
+
 def _format_sources(docs, answer: str = "") -> List[Dict[str, str]]:
     """
     将检索来源格式化为精简列表。
@@ -211,29 +261,39 @@ def _format_sources(docs, answer: str = "") -> List[Dict[str, str]]:
             seen_laws.append(law)
 
     if answer:
-        # 从 AI 回答中提取实际引用的条号
+        # 从 AI 回答中提取实际引用的“法名 + 条号”。
+        # 不能只按条号匹配，否则《刑法》第六十七条可能被错误挂到
+        # 其他司法解释或补充规定的“第六十七条”上。
+        cited_pairs = _extract_law_article_citations(answer)
         cited_articles = _extract_article_numbers(answer)
         # 按法律名分组（每部法律下有哪些引用的条号）
         law_articles: Dict[str, List[str]] = {law: [] for law in seen_laws}
+
+        paired_articles = {article for _, article in cited_pairs}
+        for cited_law, art in cited_pairs:
+            matched_laws = [law for law in seen_laws if _law_name_matches(cited_law, law)]
+            for law in matched_laws:
+                if art not in law_articles.get(law, []):
+                    law_articles.setdefault(law, []).append(art)
+
         for art in cited_articles:
-            # 找到包含该条号的 chunk 所属法律
-            matched = False
+            if art in paired_articles:
+                continue
+            # 仅处理未带法名的裸条号引用。必须匹配 chunk 自身条号，
+            # 不能用 article_numbers（它包含正文中引用到的其他法律条号）。
             for doc in docs:
-                chunk_articles = doc.metadata.get("article_numbers", "")
-                if art in chunk_articles:
+                if _doc_own_article_matches(doc, art):
                     law = doc.metadata.get("source", "")
                     if law and art not in law_articles.get(law, []):
                         law_articles.setdefault(law, []).append(art)
-                    matched = True
                     break
-            # 如果 chunk 中没找到匹配，放到第一个法律下（兜底）
-            if not matched and seen_laws:
-                if art not in law_articles.get(seen_laws[0], []):
-                    law_articles.setdefault(seen_laws[0], []).append(art)
 
         sources = []
+        has_article_citations = bool(cited_articles)
         for law in seen_laws:
             arts = law_articles.get(law, [])
+            if has_article_citations and not arts:
+                continue
             label = f"{law} {'、'.join(arts)}" if arts else law
             sources.append({"source": label, "content": "", "full_content": ""})
         return sources

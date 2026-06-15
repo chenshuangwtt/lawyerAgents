@@ -14,9 +14,9 @@ from typing import Callable, Iterable, List, Optional
 
 import jieba
 from langchain_core.documents import Document
-from langchain_community.document_loaders import Docx2txtLoader
 
-from app.loader import split_documents
+from app.docx_reader import read_docx_text
+from app.interpretation_splitter import split_interpretation_documents
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,17 @@ _STOP_TERMS = {
     "关于", "审理", "适用", "法律", "问题", "解释", "规定", "案件",
     "一个", "现有", "完全", "相关",
 }
+_THEFT_QUERY_TERMS = {"盗窃", "偷窃", "偷东西", "入户盗窃", "入室盗窃", "入户", "入室"}
+_THEFT_INTERPRETATION_TERMS = {"盗窃", "盗窃罪", "入户盗窃", "入室盗窃", "盗窃公私财物"}
+
+
+def _is_theft_query(query: str) -> bool:
+    return any(term in (query or "") for term in _THEFT_QUERY_TERMS)
+
+
+def _row_has_theft_terms(row: sqlite3.Row) -> bool:
+    text = "\n".join(str(row[key] or "") for key in ("title", "content", "summary", "search_text"))
+    return any(term in text for term in _THEFT_INTERPRETATION_TERMS)
 
 
 def clean_interpretation_title(path: Path) -> str:
@@ -123,21 +134,23 @@ def _load_interpretation_chunks(
     *,
     chunk_size: int,
     chunk_overlap: int,
-    loader_factory: Callable[[str], object],
+    loader_factory: Optional[Callable[[str], object]] = None,
 ) -> List[Document]:
     title = clean_interpretation_title(path)
-    docs = loader_factory(str(path)).load()
+    if loader_factory is not None:
+        docs = loader_factory(str(path)).load()
+    else:
+        docs = [Document(page_content=read_docx_text(path), metadata={})]
     for doc in docs:
         doc.metadata["source"] = title
         doc.metadata["file_path"] = str(path)
         doc.metadata["doc_type"] = "judicial_interpretation"
 
-    chunks = split_documents(
+    chunks = split_interpretation_documents(
         docs,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         min_chunk_size=120,
-        split_by="article",
     )
     for chunk in chunks:
         chunk.metadata["source"] = title
@@ -152,7 +165,7 @@ def build_interpretation_library(
     *,
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
-    loader_factory: Callable[[str], object] = Docx2txtLoader,
+    loader_factory: Optional[Callable[[str], object]] = None,
 ) -> int:
     """从司法解释 docx 目录构建独立 SQLite FTS 库，返回 chunk 数。"""
     source_path = Path(source_dir)
@@ -309,6 +322,10 @@ class JudicialInterpretationLibrary:
         rows = self._search_fts(terms, top_k * 3)
         if not rows:
             rows = self._search_like(query, terms, top_k * 3)
+        if _is_theft_query(query):
+            theft_rows = [row for row in rows if _row_has_theft_terms(row)]
+            if theft_rows:
+                rows = theft_rows
         docs = [self._row_to_document(row) for row in rows[:top_k]]
         for doc in docs:
             doc.metadata["doc_type"] = "judicial_interpretation"

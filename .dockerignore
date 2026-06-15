@@ -1,42 +1,53 @@
 # Version control
-.git
+.git/
+.github/
 .gitignore
 
-# Python
-__pycache__
-*.pyc
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
 *.pyo
-.venv
-venv
-*.egg-info
+*.egg-info/
+.venv/
+venv/
+
+# Test and coverage artifacts
+.pytest_cache/
+.pytest_tmp/
+.pytest_tmp*/
+.pytest_work/
+.test_chat_history_tmp/
+.test_interpretation_searcher_tmp/
+.test_official_cases_tmp/
+.coverage
+.coverage.*
+tests/
 
 # Environment / secrets
 .env
+.env.*
+!.env.example
 
-# Database and cache
-chroma_db
-data/db
-models_cache
+# Runtime data, generated indexes and caches
+chroma_db/
+models_cache/
+logs/
+data/db/
+data/eval/
+data/CaseMatch/
+data/official_cases/processed/*.sqlite3*
 
-# Logs
-logs
+# Frontend is built/deployed separately for now
+frontend/node_modules/
+frontend/dist/
 
-# IDE
-.idea
+# IDE and OS files
+.idea/
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db
 
-# Frontend build artifacts and dependencies (rebuilt in Docker)
-frontend/dist
-frontend/node_modules
-
-# Docker files (don't include in context)
-Dockerfile
-docker-compose*.yml
-
-# Misc
-*.md
-!README.md
-LICENSE
-tests/
-scripts/
-docs/
+# Local helper files
 test_api.http
+*.log

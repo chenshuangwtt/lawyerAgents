@@ -29,6 +29,12 @@ class TestClassifyIntent:
     def test_analysis_sue(self):
         assert classify_intent("我想起诉对方违约，帮我分析一下案情怎么维权比较好") == "analysis"
 
+    def test_generic_rights_question_stays_qa(self):
+        assert classify_intent("公司高管挪用了员工的工资款，员工该怎么维权？能追究刑事责任吗？") == "qa"
+
+    def test_personal_fact_pattern_can_enter_analysis(self):
+        assert classify_intent("我在公司工作三年，上个月被辞退了，没有补偿，我该怎么维权？") == "analysis"
+
     # --- document ---
     def test_document_arbitration(self):
         assert classify_intent("帮我写一份劳动仲裁申请书") == "document"
@@ -41,6 +47,9 @@ class TestClassifyIntent:
 
     def test_document_contract_review(self):
         assert classify_intent("合同审查一下") == "document"
+
+    def test_apply_arbitration_is_not_document_generation(self):
+        assert classify_intent("老板拖欠工资还威胁恐吓员工，员工该怎么维权？能否同时报警和申请仲裁？") == "qa"
 
     # --- priority ---
     def test_document_over_statute(self):

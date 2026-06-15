@@ -64,8 +64,17 @@ async def ask_analysis_stream(
 
         # 从主张中提取实际领域（而非硬编码"综合"）
         primary_domain = claims[0].get("domain", "综合") if claims else "综合"
+        initial_domains = list(dict.fromkeys(
+            c.get("domain", "") for c in claims if c.get("domain")
+        ))
         logger.info("[analysis_stream] yield meta (domain=%s)", primary_domain)
-        yield {"type": "meta", "intent": "analysis", "domain": primary_domain}
+        yield {
+            "type": "meta",
+            "intent": "analysis",
+            "domain": primary_domain,
+            "domains": initial_domains or [primary_domain],
+            "multi_domain": len(initial_domains) > 1,
+        }
 
         logger.info("[analysis_stream] yield substep: decompose")
         yield {"type": "substep", "step": "decompose",
@@ -225,6 +234,8 @@ async def ask_analysis_stream(
             "sources": sources,
             "risk_warning": RISK_WARNING,
             "domain": claims[0].get("domain", "综合") if claims else "综合",
+            "domains": domain_history or [claims[0].get("domain", "综合") if claims else "综合"],
+            "multi_domain": len(domain_history) > 1,
             "case_results": case_results,
             "case_state": new_case_state,
             "case_analysis_id": analysis_record["case_analysis_id"],

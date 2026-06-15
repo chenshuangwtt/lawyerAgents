@@ -81,6 +81,46 @@ def test_unmatched_query_does_not_read_interpretation_files():
         shutil.rmtree(tmp_path.parent, ignore_errors=True)
 
 
+def test_theft_query_prefers_theft_interpretation_files():
+    from app.interpretation_searcher import JudicialInterpretationSearcher
+
+    tmp_path = _workspace_tmp_dir()
+    try:
+        theft = tmp_path / "最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释.docx"
+        crime_names = tmp_path / "最高人民法院、最高人民检察院关于执行中华人民共和国刑法确定罪名的补充规定.docx"
+        forest = tmp_path / "最高人民法院最高人民检察院关于适用中华人民共和国刑法第三百四十四条有关问题的批复.docx"
+        for path in [theft, crime_names, forest]:
+            path.write_text("placeholder", encoding="utf-8")
+
+        searcher = JudicialInterpretationSearcher(
+            str(tmp_path),
+            top_k=1,
+            candidate_file_count=1,
+        )
+        loaded = []
+
+        def fake_load(path):
+            loaded.append(path)
+            return [Document(
+                page_content="盗窃公私财物价值三万元至十万元以上的，应当认定为数额巨大。",
+                metadata={"source": path.stem, "file_path": str(path)},
+            )]
+
+        searcher._load_file_chunks = fake_load
+
+        docs = searcher.search(
+            "入室盗窃价值三万元财物，会被判几年？",
+            domain="刑事",
+            law_names=["中华人民共和国刑法"],
+        )
+
+        assert loaded == [theft]
+        assert len(docs) == 1
+        assert "盗窃" in docs[0].page_content
+    finally:
+        shutil.rmtree(tmp_path.parent, ignore_errors=True)
+
+
 def test_search_prefers_independent_library_without_reading_docx():
     from app.interpretation_library import build_interpretation_library
     from app.interpretation_searcher import JudicialInterpretationSearcher

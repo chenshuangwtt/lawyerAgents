@@ -5,7 +5,7 @@ langchain-openai>=1.2
 langchain-deepseek>=1.0
 langchain-community>=0.3
 langchain-chroma>=0.2
-langchain-text>=0.1
+langchain-text-splitters>=0.3
 langgraph>=0.4
 
 # --- 向量/检索 ---

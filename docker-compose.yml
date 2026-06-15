@@ -1,0 +1,45 @@
+services:
+  lawyer-agents:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+    image: lawyer-agents:local
+    container_name: lawyer-agents
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      PORT: ${PORT:-9000}
+      DATA_DIR: /app/data
+      CHROMA_PERSIST_DIR: /app/chroma_db
+      APP_DB_PATH: /app/runtime/db/app.sqlite3
+      INTERPRETATION_DIR: /app/data/司法解释
+      INTERPRETATION_DB_PATH: /app/runtime/db/interpretations.sqlite3
+      OFFICIAL_CASE_RAW_DIR: /app/data/official_cases/raw
+      OFFICIAL_CASE_PROCESSED_FILE: /app/data/official_cases/processed/official_cases.jsonl
+      CASE_DB_PATH: /app/data/CaseMatch/cases.sqlite3
+      CASE_LANCEDB_DIR: /app/runtime/cases/lancedb
+      HF_CACHE_DIR: /app/models_cache
+      HF_HOME: /app/models_cache
+      HF_HUB_CACHE: /app/models_cache/hub
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HUB_DISABLE_XET: ${HF_HUB_DISABLE_XET:-1}
+    ports:
+      - "${PORT:-9000}:9000"
+    volumes:
+      - ./data:/app/data:ro
+      - chroma_db:/app/chroma_db
+      - models_cache:/app/models_cache
+      - runtime_data:/app/runtime
+      - app_logs:/app/logs
+    restart: unless-stopped
+
+volumes:
+  chroma_db:
+  models_cache:
+  runtime_data:
+  app_logs:

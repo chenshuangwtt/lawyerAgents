@@ -15,8 +15,57 @@ from app.rag_citations import format_case_context
 logger = logging.getLogger(__name__)
 
 
+def doc_identity(doc: Document) -> str:
+    """Stable-enough identity for de-duplicating retrieved chunks."""
+    meta = doc.metadata or {}
+    return "::".join([
+        str(meta.get("source", "")),
+        str(meta.get("article", "")),
+        doc.page_content[:200],
+    ])
+
+
+def unique_docs(docs: List[Document]) -> List[Document]:
+    seen = set()
+    result = []
+    for doc in docs or []:
+        key = doc_identity(doc)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(doc)
+    return result
+
+
+def split_support_docs(
+    expanded_docs: List[Document],
+    primary_docs: List[Document],
+) -> List[Document]:
+    """Return expanded context docs that are not primary hits."""
+    primary_keys = {doc_identity(doc) for doc in primary_docs or []}
+    return [
+        doc for doc in unique_docs(expanded_docs)
+        if doc_identity(doc) not in primary_keys
+    ]
+
+
+def build_generation_docs(
+    primary_docs: List[Document],
+    support_docs: List[Document],
+    interpretation_docs: List[Document],
+) -> List[Document]:
+    """Docs visible to the LLM: primary law + context support + interpretations."""
+    return unique_docs(
+        list(primary_docs or [])
+        + list(support_docs or [])
+        + list(interpretation_docs or [])
+    )
+
+
 def search_cases(question: str, domain: str, components: dict) -> list:
     """Search case references while honoring configured case library coverage."""
+    if not components.get("enable_case_retrieval", False):
+        return []
     case_searcher = components.get("case_searcher")
     if not case_searcher or not case_searcher.available or _is_overview_question(question):
         return []
@@ -134,6 +183,8 @@ def merge_interpretation_docs(
 
 def build_official_case_context(question: str, domain: str, components: Dict) -> str:
     """Build official-case reference context for prompt injection."""
+    if not components.get("enable_case_retrieval", False):
+        return ""
     if components.get("case_library") != "official_cases":
         return ""
     context_cases = search_cases(question, domain, components)
@@ -155,3 +206,31 @@ def build_context_text(expanded_docs: List[Document], case_context: str = "") ->
             + case_context
         )
     return "\n\n".join(context_parts)
+
+
+def build_structured_context_text(trace: Dict, case_context: str = "") -> str:
+    """Assemble prompt context with explicit source roles."""
+    sections = [
+        ("【主法条】", trace.get("primary_docs", [])),
+        ("【补充条文】", trace.get("support_docs", [])),
+        ("【司法解释】", trace.get("interpretation_docs", [])),
+    ]
+    parts = []
+    index = 1
+    for title, docs in sections:
+        docs = docs or []
+        if not docs:
+            continue
+        parts.append(title)
+        for doc in docs:
+            source = doc.metadata.get("source", "未知法律")
+            article = doc.metadata.get("article", "")
+            article_label = f" {article}" if article else ""
+            parts.append(f"[{index}] 来源：{source}{article_label}\n{doc.page_content}")
+            index += 1
+    if case_context:
+        parts.append(
+            "【类案参考说明】以下官方精选案例仅供类案参考，不替代法律法规或司法解释。\n"
+            + case_context
+        )
+    return "\n\n".join(parts)
