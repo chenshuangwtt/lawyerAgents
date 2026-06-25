@@ -123,3 +123,25 @@ def test_data_hash_ignores_excluded_dirs():
         assert third != first
     finally:
         shutil.rmtree(tmp_path.parent, ignore_errors=True)
+
+
+def test_merge_small_chunks_recomputes_article_number_ints():
+    from app.loader import _merge_small_chunks
+    from langchain_core.documents import Document
+
+    chunks = [
+        Document(
+            page_content="第一条甲。",
+            metadata={"article_numbers": "第一条", "article_numbers_int": "1"},
+        ),
+        Document(
+            page_content="第二条乙。",
+            metadata={"article_numbers": "第二条", "article_numbers_int": "2"},
+        ),
+    ]
+
+    merged = _merge_small_chunks(chunks, min_size=20, max_size=100)
+
+    assert len(merged) == 1
+    assert merged[0].metadata["article_numbers"] == "第一条,第二条"
+    assert merged[0].metadata["article_numbers_int"] == "1,2"

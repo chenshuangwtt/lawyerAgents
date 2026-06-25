@@ -1,0 +1,59 @@
+{
+  "name": "retrieval-baseline-2026-06-25",
+  "dataset": "eval/eval_dataset_30.jsonl",
+  "result_file": "eval/baseline_30_retrieval_results.jsonl",
+  "report_file": "eval/baseline_report.md",
+  "mode": "direct",
+  "skip_generation": true,
+  "corpus": {
+    "law_files": 21,
+    "chunks": 1421,
+    "article_count": 3701
+  },
+  "settings": {
+    "bm25_top_k": 40,
+    "vector_top_k": 40,
+    "rerank_top_k": 40,
+    "enable_source_coverage_selection": true,
+    "source_coverage_candidate_k": 40,
+    "source_coverage_max_sources": 6,
+    "source_coverage_per_source": 1
+  },
+  "metrics": {
+    "total_samples": 30,
+    "multi_law_samples": 27,
+    "article_labeled_samples": 8,
+    "ground_truth_samples": 30,
+    "successful_samples": 30,
+    "error_samples": 0,
+    "final_target_hit": "30/30",
+    "final_law_all_hit": "27/27",
+    "final_article_hit": "8/8",
+    "rrf_target_hit": "30/30",
+    "rrf_article_hit": "8/8",
+    "final_hit_at_5": "26/30",
+    "final_hit_at_10": "29/30",
+    "data_coverage_gaps": 0,
+    "average_latency_ms": 5674.7,
+    "p95_latency_ms": 10085.5,
+    "final_mrr": 0.3103
+  },
+  "known_misses": [
+    {
+      "id": "telefraud_001",
+      "status": "fixed",
+      "reason": "已通过电诈账户检索提示和 query-priority source coverage 修复；最终上下文包含《反电信网络诈骗法》和《刑事诉讼法》。"
+    },
+    {
+      "id": "procedure_005",
+      "status": "fixed",
+      "reason": "已通过执行措施法条提示修复；最终上下文包含《民事诉讼法》第252、265、266条。"
+    }
+  ],
+  "notes": [
+    "target hit requires all expected_laws to be present; expected_articles are also required when provided.",
+    "This baseline is for deterministic retrieval diagnostics and does not run an LLM judge.",
+    "All 30 baseline samples include ground_truth, so generated answers can be converted to RAGAS reference fields.",
+    "Do not delete known misses to improve the score; use them as regression targets for retrieval optimization."
+  ]
+}

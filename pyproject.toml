@@ -1,13 +1,16 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "lawyer-agents"
 version = "0.1.0"
 requires-python = ">=3.10"
 description = "基于中国法律文书的 RAG 智能法律咨询系统"
-license = {text = "MIT"}
+license = "MIT"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

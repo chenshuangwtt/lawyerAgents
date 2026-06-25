@@ -22,6 +22,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.vectorstores import VectorStore
 
+from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
 from app.classifier import classify_question
 from app.hybrid_retriever import ChineseBM25Retriever
 from app.reranker import CrossEncoderReranker
@@ -50,8 +51,50 @@ from app.rag_retrieval import (
     hybrid_retrieve,
     rerank_documents,
 )
+from app.rag_query_expansion import build_retrieval_query
 
 logger = logging.getLogger(__name__)
+
+
+_ANSWER_RISK_MARKERS = (
+    "虽未",
+    "虽未列明",
+    "虽未直接列出",
+    "未在检索",
+    "未在检索中列出",
+    "未列明",
+    "未列出",
+    "未出现",
+    "未包含",
+    "未直接列出",
+    "本次检索未包含",
+    "不作为本分析依据",
+    "常识性规定",
+    "通识性规定",
+    "司法实践",
+    "实务中通常",
+    "通常为",
+    "通常从",
+    "一般为",
+    "一般从",
+    "时效通常",
+    "仲裁时效一般",
+    "起算",
+    "可推导",
+    "可推知",
+    "推导",
+)
+
+_ANSWER_BRACKET_CITATION_RE = re.compile(
+    r"《([^》]+)》\s*"
+    r"(第[一二三四五六七八九十百千万0-9]+条(?:之[一二三四五六七八九十]+)?)"
+)
+
+_ANSWER_BARE_CITATION_RE = re.compile(
+    r"(中华人民共和国)?"
+    r"(刑法|民法典|公司法|劳动合同法|劳动争议调解仲裁法|民事诉讼法|反电信网络诈骗法)"
+    r"\s*(第[一二三四五六七八九十百千万0-9]+条(?:之[一二三四五六七八九十]+)?)"
+)
 
 
 # 案情状态提取 prompt
@@ -112,6 +155,136 @@ def _format_case_state(case_state_json: str) -> str:
     return "【案情追踪】" + " | ".join(parts) if parts else ""
 
 
+def _short_law_name(name: str) -> str:
+    return re.sub(r"\s+", "", str(name or "").replace("中华人民共和国", ""))
+
+
+def _article_key(article: str) -> tuple[int, str]:
+    match = ARTICLE_PATTERN.search(article or "")
+    if not match:
+        return (0, "")
+    return (chinese_num_to_int(match.group(1)), match.group(2) or "")
+
+
+def _doc_article_keys(doc: Any) -> set[tuple[int, str]]:
+    meta = getattr(doc, "metadata", {}) or {}
+    keys: set[tuple[int, str]] = set()
+    for value in str(meta.get("article_numbers_int", "") or "").split(","):
+        value = value.strip()
+        if value.isdigit():
+            keys.add((int(value), ""))
+    for value in (meta.get("article"), meta.get("article_numbers")):
+        for match in ARTICLE_PATTERN.finditer(str(value or "")):
+            keys.add((chinese_num_to_int(match.group(1)), match.group(2) or ""))
+    for match in ARTICLE_PATTERN.finditer(str(getattr(doc, "page_content", "") or "")):
+        keys.add((chinese_num_to_int(match.group(1)), match.group(2) or ""))
+    return {key for key in keys if key[0] > 0}
+
+
+def _build_retrieved_citation_whitelist(docs: list) -> dict[str, set[tuple[int, str]]]:
+    whitelist: dict[str, set[tuple[int, str]]] = {}
+    for doc in docs or []:
+        law = _short_law_name((getattr(doc, "metadata", {}) or {}).get("source", ""))
+        if not law:
+            continue
+        keys = _doc_article_keys(doc)
+        if keys:
+            whitelist.setdefault(law, set()).update(keys)
+    return whitelist
+
+
+def _citation_supported(
+    law_name: str,
+    article: str,
+    whitelist: dict[str, set[tuple[int, str]]],
+) -> bool:
+    law = _short_law_name(law_name)
+    article_key = _article_key(article)
+    return bool(law and article_key[0] > 0 and article_key in whitelist.get(law, set()))
+
+
+def _extract_answer_citations(line: str) -> list[tuple[str, str]]:
+    citations = list(_ANSWER_BRACKET_CITATION_RE.findall(line or ""))
+    for prefix, law, article in _ANSWER_BARE_CITATION_RE.findall(line or ""):
+        citations.append((f"{prefix or ''}{law}", article))
+    return citations
+
+
+def _sanitize_answer_against_retrieval(answer_text: str, generation_docs: list) -> str:
+    """Remove obvious unsupported citation claims from non-streaming answers.
+
+    The LLM sometimes explains around missing evidence despite the prompt. This
+    deterministic guard keeps the final answer aligned with retrieved docs.
+    """
+    if not answer_text:
+        return answer_text
+
+    whitelist = _build_retrieved_citation_whitelist(generation_docs)
+    sanitized_lines: list[str] = []
+    suppress_current_point = False
+
+    for line in answer_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            sanitized_lines.append(line)
+            continue
+        if stripped.startswith("###"):
+            suppress_current_point = False
+        elif re.match(r"^\d+[.、]\s*", stripped):
+            suppress_current_point = False
+
+        has_risk_marker = any(marker in line for marker in _ANSWER_RISK_MARKERS)
+        citations = _extract_answer_citations(line)
+        unsupported_citation = any(
+            not _citation_supported(law, article, whitelist)
+            for law, article in citations
+        )
+        if has_risk_marker or unsupported_citation:
+            suppress_current_point = True
+            continue
+        if suppress_current_point and (
+            stripped.startswith("- 适用") or stripped.startswith("- 结论")
+        ):
+            continue
+        sanitized_lines.append(line)
+
+    sanitized_lines = _drop_empty_numbered_points(sanitized_lines)
+    sanitized = "\n".join(sanitized_lines)
+    for marker in _ANSWER_RISK_MARKERS:
+        sanitized = sanitized.replace(marker, "当前检索依据不足")
+    return sanitized
+
+
+def _drop_empty_numbered_points(lines: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if re.match(r"^\d+[.、]\s*", stripped):
+            end = index + 1
+            while end < len(lines):
+                next_stripped = lines[end].strip()
+                if next_stripped.startswith("###") or re.match(r"^\d+[.、]\s*", next_stripped):
+                    break
+                end += 1
+            block = lines[index:end]
+            has_content = any(line.strip() for line in block[1:])
+            has_basis = any(line.strip().startswith("- 依据") for line in block[1:])
+            if has_content and has_basis:
+                cleaned.extend(block)
+            index = end
+            continue
+        cleaned.append(lines[index])
+        index += 1
+
+    compacted: list[str] = []
+    for line in cleaned:
+        if not line.strip() and (not compacted or not compacted[-1].strip()):
+            continue
+        compacted.append(line)
+    return compacted
+
+
 def _get_case_state(session_id: str) -> Optional[str]:
     """从 DB 获取最近一条记录的案情状态（精准查询，不加载其他字段）。"""
     try:
@@ -138,11 +311,18 @@ CONTEXTUALIZE_Q_PROMPT = ChatPromptTemplate.from_messages([
 QA_SHARED_GUARDRAILS = """\
 【回答边界】
 - 只基于用户问题、案情追踪和“相关法律条文”回答；不得编造法律名称、条号、地区标准或事实细节。
-- 未检索到直接依据时，明确说明依据不足，并提示需要补充的信息或咨询专业律师。
-- 引用法条时写明《法律名称》第X条；优先概括条文要点，除非必要不要整段摘录原文。
+- 未检索到直接依据的法律点直接省略；只有整题没有任何可用依据时，才简短说明“当前检索依据不足”。
+- “相关法律条文”是唯一可引用依据；只要该区域没有出现某部法律或某个条号，就不得把它写入“依据”或结论。
+- 引用法条时写明《法律名称》第X条；只能引用“相关法律条文”中实际出现的法律名称和条号，不得引用上下文没有出现的条号。
+- 答案全文不得出现“虽未”“未列明”“未列出”“未在检索”“常识性规定”“通识性规定”“司法实践”“实务中通常”“通常为”“通常从”“一般为”“一般从”“时效通常”“仲裁时效一般”“起算”“可推导”“可推知”“推导”等表达。
+- 不得补充未在“相关法律条文”中出现的仲裁/诉讼时效、司法实践口径、地方标准、裁判规则或计算细则；缺少这些规则时直接不展开该点。
+- 如果判断需要某个关键法条但“相关法律条文”没有提供，不要写该法条名称、条号或由其推出的结论。
+- 不要提及未检索到的具体法律名称、司法解释名称、监管文件名称或条号；只能概括为“可能还需补充相关规定”。
+- 如果问题涉及多部法律，必须在“法律依据与分析”中分别覆盖每部与问题直接相关的法律；不要只回答主法律而遗漏程序法、责任法或特别法。
+- 如果检索上下文包含某部法律但该法律与问题事实不直接相关，可以明确说明“不作为主要依据”，不要为了覆盖而强行适用。
 - 加粗只用于结论、罪名、责任类型、时限、金额区间等分析重点，避免整段加粗。
 - 刑事量刑只给可能区间和影响因素，不承诺确定刑期；注意区分生活表述与法定概念。对“入室/入户”等概念，先提示需确认场所性质。
-- 回答保持简洁，每个编号点通常不超过 4 行；不要输出长篇法条摘录或论文式展开。
+- 回答保持简洁，每个编号点通常不超过 4 行；不要输出长篇法条摘录、论文式展开或未被条文支持的实务建议。
 - 直接回答当前问题，不点评历史回答，不假设用户已经做过分析。
 """
 
@@ -160,7 +340,7 @@ QA_OUTPUT_STRUCTURE = """\
    - 结论：用一句话归纳该问题点。
 
 ### ⚠️ 实务建议与风险提示
-用 2-4 条列表给出可执行建议，并列出影响结果的关键变量。
+用 1-2 条列表给出由已检索条文可直接支持的建议或关键变量；不得补充未检索依据支持的证据清单、维权路径、时效、金额计算或裁判口径。
 
 ### 📜 免责声明
 本回复由 AI 生成，仅供学习参考，不构成正式法律意见。法律事务复杂多变，请咨询持证律师或有关机构。
@@ -305,10 +485,15 @@ def build_rag_chain(
     lightweight_llm: Optional[BaseChatModel] = None,
     top_k: int = 5,
     bm25_top_k: int = 10,
+    bm25_per_law_k: int = 0,
     vector_top_k: int = 10,
     rerank_top_k: int = 20,
     rerank_final_k: int = 5,
     rrf_constant: int = 60,
+    enable_source_coverage_selection: bool = True,
+    source_coverage_candidate_k: int = 20,
+    source_coverage_max_sources: int = 3,
+    source_coverage_per_source: int = 1,
     adjacent_range: int = 1,
     enable_classification: bool = True,
     memory_keep_recent_rounds: int = 3,
@@ -353,10 +538,15 @@ def build_rag_chain(
         "chunks": chunks,
         "lightweight_llm": lightweight_llm,
         "bm25_top_k": bm25_top_k,
+        "bm25_per_law_k": bm25_per_law_k,
         "vector_top_k": vector_top_k,
         "rerank_top_k": rerank_top_k,
         "rerank_final_k": rerank_final_k,
         "rrf_constant": rrf_constant,
+        "enable_source_coverage_selection": enable_source_coverage_selection,
+        "source_coverage_candidate_k": source_coverage_candidate_k,
+        "source_coverage_max_sources": source_coverage_max_sources,
+        "source_coverage_per_source": source_coverage_per_source,
         "adjacent_range": adjacent_range,
         "enable_classification": enable_classification,
     }
@@ -421,16 +611,19 @@ def _retrieve_context(
     _case_state = _get_case_state(session_id)
     contextualized_q = _contextualize_query(contextualize_llm, history_obj.messages, question, case_state=_case_state)
     timings["contextualize"] = round((time.perf_counter() - _t) * 1000)
+    retrieval_query = build_retrieval_query(contextualized_q, domain, law_names)
+    if retrieval_query != contextualized_q:
+        logger.info("[检索扩展] 已添加跨法律检索提示，chars=%d", len(retrieval_query))
 
     # ③ 混合检索（BM25 + 向量 + RRF）
     _t = time.perf_counter()
-    merged_docs, _retrieval_stats = hybrid_retrieve(retriever, contextualized_q, law_names, components)
+    merged_docs, _retrieval_stats = hybrid_retrieve(retriever, retrieval_query, law_names, components)
     timings["retrieve"] = round((time.perf_counter() - _t) * 1000)
 
     # ④ Rerank 精排（简单查询跳过，直接取 top-N）
     _t = time.perf_counter()
     reranked_docs, reranked_scores = rerank_documents(
-        contextualized_q,
+        retrieval_query,
         merged_docs,
         components,
         simple_mode=simple_mode,
@@ -441,7 +634,7 @@ def _retrieve_context(
     # ⑤ 法条上下文扩展（前后条 + 跨条引用）
     _t = time.perf_counter()
     expanded_docs = expand_retrieved_context(
-        contextualized_q,
+        retrieval_query,
         reranked_docs,
         article_index,
         components,
@@ -457,7 +650,7 @@ def _retrieve_context(
     # ⑤.6 司法解释按需补充。司法解释不进入主法条全量向量库，
     # 但会在每次问题检索时读取少量相关文件，作为回答和案情分析依据。
     interpretation_docs = _retrieve_interpretation_docs(
-        contextualized_q, domain, law_names, components
+        retrieval_query, domain, law_names, components
     )
     generation_docs = build_generation_docs(
         primary_docs,
@@ -470,6 +663,9 @@ def _retrieve_context(
         "interpretation_docs": interpretation_docs,
         "generation_docs": generation_docs,
     }
+    if components.get("enable_retrieval_trace", False):
+        retrieval_trace["candidate_docs"] = list(merged_docs)
+        retrieval_trace["retrieval_stats"] = _retrieval_stats
 
     # ⑤.7 官方精选案例作为类案参考。法律法规和司法解释仍是主依据。
     case_context = ""
@@ -492,6 +688,7 @@ def _retrieve_context(
         "context_text": context_text,
         "domain": domain,
         "question": contextualized_q,
+        "retrieval_query": retrieval_query,
         "retrieval_trace": retrieval_trace,
         "reranked_docs": reranked_docs,
         "reranked_scores": reranked_scores,
@@ -532,6 +729,10 @@ def ask(
 
     # ⑦ 后处理：引用校验 → 案例检索 → 案情状态
     answer_text = response.content if hasattr(response, "content") else str(response)
+    answer_text = _sanitize_answer_against_retrieval(
+        answer_text,
+        ctx.get("retrieval_trace", {}).get("generation_docs", []),
+    )
     post = _post_process_answer(
         answer_text, ctx.get("retrieval_trace", {}), ctx["article_index"],
         question, ctx["domain"], components, skip_case_search=simple,

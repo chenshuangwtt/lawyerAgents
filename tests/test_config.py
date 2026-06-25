@@ -25,6 +25,11 @@ def test_settings_reads_retrieval_and_case_env(monkeypatch):
     monkeypatch.setenv("VECTOR_TOP_K", "8")
     monkeypatch.setenv("RERANK_FINAL_K", "4")
     monkeypatch.setenv("ENABLE_RERANK", "false")
+    monkeypatch.setenv("ENABLE_SOURCE_COVERAGE_SELECTION", "false")
+    monkeypatch.setenv("SOURCE_COVERAGE_CANDIDATE_K", "12")
+    monkeypatch.setenv("SOURCE_COVERAGE_MAX_SOURCES", "2")
+    monkeypatch.setenv("ENABLE_LOCAL_RERANKER_FALLBACK", "true")
+    monkeypatch.setenv("LOCAL_RERANKER_MODEL", "local-reranker-test")
     monkeypatch.setenv("USE_OFFICIAL_CASES", "false")
     monkeypatch.setenv("USE_LEGACY_CASES", "true")
     monkeypatch.setenv("OFFICIAL_CASE_TOP_K", "2")
@@ -36,6 +41,11 @@ def test_settings_reads_retrieval_and_case_env(monkeypatch):
     assert settings.vector_top_k == 8
     assert settings.rerank_final_k == 4
     assert settings.enable_rerank is False
+    assert settings.enable_source_coverage_selection is False
+    assert settings.source_coverage_candidate_k == 12
+    assert settings.source_coverage_max_sources == 2
+    assert settings.enable_local_reranker_fallback is True
+    assert settings.local_reranker_model == "local-reranker-test"
     assert settings.use_official_cases is False
     assert settings.use_legacy_cases is True
     assert settings.official_case_top_k == 2
@@ -48,6 +58,26 @@ def test_case_retrieval_is_hidden_by_default(monkeypatch):
     settings = Settings()
 
     assert settings.enable_case_retrieval is False
+
+
+def test_source_coverage_defaults_cover_four_legal_sources(monkeypatch):
+    monkeypatch.delenv("BM25_TOP_K", raising=False)
+    monkeypatch.delenv("BM25_PER_LAW_K", raising=False)
+    monkeypatch.delenv("VECTOR_TOP_K", raising=False)
+    monkeypatch.delenv("RERANK_TOP_K", raising=False)
+    monkeypatch.delenv("SOURCE_COVERAGE_CANDIDATE_K", raising=False)
+    monkeypatch.delenv("SOURCE_COVERAGE_MAX_SOURCES", raising=False)
+    monkeypatch.delenv("ENABLE_LOCAL_RERANKER_FALLBACK", raising=False)
+
+    settings = Settings()
+
+    assert settings.bm25_top_k == 40
+    assert settings.bm25_per_law_k == 2
+    assert settings.vector_top_k == 40
+    assert settings.rerank_top_k == 40
+    assert settings.source_coverage_candidate_k == 40
+    assert settings.source_coverage_max_sources == 6
+    assert settings.enable_local_reranker_fallback is False
 
 
 def test_settings_reads_database_and_cache_env(monkeypatch, tmp_path):
@@ -86,4 +116,5 @@ def test_hot_config_contains_expected_runtime_fields(monkeypatch):
 
     assert hot_config["enable_case_analysis"] is True
     assert hot_config["analysis_retrieval_top_k"] == 6
+    assert "enable_source_coverage_selection" in hot_config
     assert "admin_api_key" not in hot_config

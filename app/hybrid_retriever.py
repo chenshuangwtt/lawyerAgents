@@ -4,7 +4,7 @@
 
 import os
 import warnings
-from typing import List, Tuple, Dict, Optional
+from typing import Any, List, Tuple, Dict, Optional
 from langchain_core.documents import Document
 
 # 配置 jieba 缓存目录到项目内
@@ -22,6 +22,61 @@ def _build_doc_key(doc: Document) -> str:
     """构建文档去重 key（来源 + 内容前 200 字）。"""
     source = doc.metadata.get("source", "")
     return f"{source}::{doc.page_content[:200]}"
+
+
+def _select_source_coverage_keys(
+    sorted_keys: List[str],
+    doc_map: Dict[str, Document],
+    *,
+    k: int,
+    max_sources: int = 3,
+    per_source: int = 1,
+) -> List[str]:
+    """Keep a few distinct sources in the fused candidate pool."""
+    if k <= 0:
+        return []
+    if max_sources <= 1 or per_source <= 0:
+        return sorted_keys[:k]
+
+    available_sources: List[str] = []
+    for key in sorted_keys:
+        source = str(doc_map[key].metadata.get("source", "") or "")
+        if source and source not in available_sources:
+            available_sources.append(source)
+        if len(available_sources) >= max_sources:
+            break
+
+    selected: List[str] = []
+    selected_set: set[str] = set()
+    covered_sources: set[str] = set()
+    per_source_counts: Dict[str, int] = {}
+
+    for key in sorted_keys:
+        if len(selected) >= k or len(covered_sources) >= max_sources:
+            break
+        source = str(doc_map[key].metadata.get("source", "") or "")
+        if not source or source in covered_sources:
+            continue
+        selected.append(key)
+        selected_set.add(key)
+        covered_sources.add(source)
+        per_source_counts[source] = per_source_counts.get(source, 0) + 1
+
+    for key in sorted_keys:
+        if len(selected) >= k:
+            break
+        if key in selected_set:
+            continue
+        source = str(doc_map[key].metadata.get("source", "") or "")
+        has_uncovered_source = any(source_name not in covered_sources for source_name in available_sources)
+        if source and per_source_counts.get(source, 0) >= per_source and has_uncovered_source:
+            continue
+        selected.append(key)
+        selected_set.add(key)
+        if source:
+            covered_sources.add(source)
+            per_source_counts[source] = per_source_counts.get(source, 0) + 1
+    return selected
 
 
 class ChineseBM25Retriever:
@@ -79,6 +134,9 @@ def reciprocal_rank_fusion(
     vector_results: List[Document],
     k: int = 20,
     rrf_constant: int = 60,
+    source_coverage: bool = False,
+    source_coverage_max_sources: int = 3,
+    source_coverage_per_source: int = 1,
 ) -> List[Document]:
     """
     Reciprocal Rank Fusion (RRF) 融合 BM25 和向量检索结果。
@@ -113,5 +171,70 @@ def reciprocal_rank_fusion(
 
     # 按 RRF 分数排序
     sorted_keys = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
+    if source_coverage:
+        sorted_keys = _select_source_coverage_keys(
+            sorted_keys,
+            doc_map,
+            k=k,
+            max_sources=source_coverage_max_sources,
+            per_source=source_coverage_per_source,
+        )
+    else:
+        sorted_keys = sorted_keys[:k]
 
-    return [doc_map[key] for key in sorted_keys[:k]]
+    return [doc_map[key] for key in sorted_keys]
+
+
+def reciprocal_rank_fusion_with_trace(
+    bm25_results: List[Tuple[Document, float]],
+    vector_results: List[Document],
+    k: int = 20,
+    rrf_constant: int = 60,
+    source_coverage: bool = False,
+    source_coverage_max_sources: int = 3,
+    source_coverage_per_source: int = 1,
+) -> Tuple[List[Document], List[Dict[str, Any]]]:
+    """RRF fusion with rank/score metadata for offline evaluation.
+
+    This keeps the production-facing ``reciprocal_rank_fusion`` return shape
+    unchanged while giving eval runners enough detail to diagnose whether a
+    miss happened in BM25, vector recall, fusion, or rerank.
+    """
+    rrf_scores: Dict[str, float] = {}
+    doc_map: Dict[str, Document] = {}
+    trace_map: Dict[str, Dict[str, Any]] = {}
+
+    for rank, (doc, score) in enumerate(bm25_results, 1):
+        key = _build_doc_key(doc)
+        rrf_scores[key] = rrf_scores.get(key, 0) + 1.0 / (rrf_constant + rank)
+        doc_map.setdefault(key, doc)
+        item = trace_map.setdefault(key, {"key": key})
+        item["bm25_rank"] = rank
+        item["bm25_score"] = float(score)
+
+    for rank, doc in enumerate(vector_results, 1):
+        key = _build_doc_key(doc)
+        rrf_scores[key] = rrf_scores.get(key, 0) + 1.0 / (rrf_constant + rank)
+        doc_map.setdefault(key, doc)
+        item = trace_map.setdefault(key, {"key": key})
+        item["vector_rank"] = rank
+
+    sorted_keys = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
+    if source_coverage:
+        sorted_keys = _select_source_coverage_keys(
+            sorted_keys,
+            doc_map,
+            k=k,
+            max_sources=source_coverage_max_sources,
+            per_source=source_coverage_per_source,
+        )
+    else:
+        sorted_keys = sorted_keys[:k]
+    docs = [doc_map[key] for key in sorted_keys]
+    trace = []
+    for rank, key in enumerate(sorted_keys, 1):
+        item = dict(trace_map.get(key, {}))
+        item["rank"] = rank
+        item["rrf_score"] = rrf_scores[key]
+        trace.append(item)
+    return docs, trace

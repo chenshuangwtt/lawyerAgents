@@ -19,10 +19,12 @@ class CrossEncoderReranker:
         api_key: str = "",
         model: str = "gte-rerank-v2",
         local_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        enable_local_fallback: bool = False,
     ):
         self.api_key = api_key
         self.model = model
         self.local_model = local_model
+        self.enable_local_fallback = enable_local_fallback
         self._local_encoder = None
 
     def _get_local_encoder(self):
@@ -109,9 +111,15 @@ class CrossEncoderReranker:
                 logger.debug("[Reranker] 远程 API 完成，返回 %d 条", len(results))
                 return results
             except Exception as e:
+                if not self.enable_local_fallback:
+                    logger.warning("[Reranker] 远程 API 失败: %s，返回原始顺序", e)
+                    return [(doc, 0.0) for doc in documents[:top_k]]
                 logger.warning("[Reranker] 远程 API 失败: %s，降级到本地模型", e)
 
         # 本地降级
+        if not self.enable_local_fallback:
+            logger.warning("[Reranker] 未配置远程 API，且本地 fallback 已关闭，返回原始顺序")
+            return [(doc, 0.0) for doc in documents[:top_k]]
         try:
             results = self._rerank_local(query, documents, top_k)
             logger.debug("[Reranker] 本地模型完成，返回 %d 条", len(results))

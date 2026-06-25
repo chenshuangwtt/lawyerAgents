@@ -1,0 +1,8 @@
+{"id":"labor_001","question":"公司一直没有和我签劳动合同，工作两年后被口头辞退，我能主张哪些赔偿？","domain":"劳动","expected_laws":["劳动合同法","劳动争议调解仲裁法"],"expected_articles":["劳动合同法第八十二条","劳动合同法第八十七条","劳动争议调解仲裁法第六条"],"type":"qa"}
+{"id":"labor_002","question":"试用期三个月后公司说不合适直接让我走，需要支付经济补偿吗？","domain":"劳动","expected_laws":["劳动合同法"],"expected_articles":["劳动合同法第三十九条","劳动合同法第四十七条","劳动合同法第八十七条"],"type":"qa"}
+{"id":"labor_008","question":"劳动合同到期后继续上班两个月，公司没续签书面合同怎么办？","domain":"劳动","expected_laws":["劳动合同法"],"expected_articles":["劳动合同法第十四条","劳动合同法第八十二条"],"type":"qa"}
+{"id":"contract_009","question":"口头约定合伙做生意没有书面合同，亏损后对方不认账怎么办？","domain":"合同","expected_laws":["民法典","民事诉讼法"],"expected_articles":["民法典第四百六十九条","民法典第九百七十二条","民法典第九百七十三条","民事诉讼法第六十七条"],"type":"qa"}
+{"id":"procedure_005","question":"申请强制执行后发现被执行人转移财产，可以要求法院采取哪些措施？","domain":"民事诉讼","expected_laws":["民事诉讼法"],"expected_articles":["民事诉讼法第二百五十二条","民事诉讼法第二百六十五条","民事诉讼法第二百六十六条"],"type":"qa"}
+{"id":"criminal_006","question":"朋友借我银行卡收刷单款，我不知道是诈骗，会不会构成帮助信息网络犯罪活动罪？","domain":"刑事","expected_laws":["刑法","反电信网络诈骗法"],"expected_articles":["刑法第二百八十七条之二","反电信网络诈骗法第二条"],"type":"qa"}
+{"id":"company_011","question":"法定代表人超越内部授权签订担保合同，公司能否拒绝承担责任？","domain":"公司","expected_laws":["民法典","公司法"],"expected_articles":["民法典第五百零四条","民法典第六百八十六条","公司法第十五条"],"expected_article_keywords":{"公司法第十五条":["提供担保","对外担保","股东会","董事会"]},"type":"qa"}
+{"id":"minor_003","question":"未成年人充值游戏花了很多钱，家长能要求平台退款吗？","domain":"未成年人","expected_laws":["民法典","未成年人保护法"],"expected_articles":["民法典第十九条","民法典第二十条","未成年人保护法第七十四条","未成年人保护法第七十五条"],"type":"qa"}

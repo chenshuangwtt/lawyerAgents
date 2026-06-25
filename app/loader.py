@@ -381,10 +381,9 @@ def _merge_small_chunks(
             # 合并内容
             buffer.page_content += "\n\n" + chunk.page_content
             # 合并元数据中的条号
-            art_old = buffer.metadata.get("article_numbers", "")
-            art_new = chunk.metadata.get("article_numbers", "")
-            if art_new:
-                buffer.metadata["article_numbers"] = art_old + "," + art_new if art_old else art_new
+            str_arts, int_arts = _extract_article_numbers(buffer.page_content)
+            buffer.metadata["article_numbers"] = ",".join(str_arts)
+            buffer.metadata["article_numbers_int"] = ",".join(str(i) for i in int_arts)
             # 合并层级路径（取较详细的）
             path_old = buffer.metadata.get("hierarchy_path", "")
             path_new = chunk.metadata.get("hierarchy_path", "")

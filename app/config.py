@@ -63,6 +63,14 @@ class Settings:
     qwen_reranker_model: str = field(
         default_factory=lambda: os.getenv("QWEN_RERANKER_MODEL", "gte-rerank-v2")
     )
+    # 远程 reranker 失败时是否尝试本地 CrossEncoder。
+    # 默认关闭，避免评测/服务运行中临时下载 HuggingFace 模型导致延迟和结果抖动。
+    enable_local_reranker_fallback: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_LOCAL_RERANKER_FALLBACK", "false").lower() == "true"
+    )
+    local_reranker_model: str = field(
+        default_factory=lambda: os.getenv("LOCAL_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    )
 
     # --- DeepSeek（LLM_PROVIDER=deepseek 时生效）---
     deepseek_api_key: str = field(
@@ -147,18 +155,23 @@ class Settings:
     #   调大 → 召回更多可能相关的法条，适合专业术语多的场景
     #   调小 → 减少噪声，但可能漏掉关键词不完全匹配但语义相关的条文
     bm25_top_k: int = field(
-        default_factory=lambda: int(os.getenv("BM25_TOP_K", "20"))
+        default_factory=lambda: int(os.getenv("BM25_TOP_K", "40"))
+    )
+    # 对分类命中的每部候选法律，额外保底取少量 BM25 候选。
+    # 跨法律问题里，某部弱相关但必要的法律常被全局 top-k 挤掉；该值用于保住入口候选。
+    bm25_per_law_k: int = field(
+        default_factory=lambda: int(os.getenv("BM25_PER_LAW_K", "2"))
     )
     # 向量语义检索候选数：按语义相似度返回 top-N 条
     #   调大 → 语义覆盖更全，适合用户表述口语化、不精确时
     #   调小 → 减少无关结果，但口语化提问可能检索不到
     vector_top_k: int = field(
-        default_factory=lambda: int(os.getenv("VECTOR_TOP_K", "20"))
+        default_factory=lambda: int(os.getenv("VECTOR_TOP_K", "40"))
     )
     # RRF 融合后送入 Rerank 的候选数（= BM25 + 向量合并后的总数上限）
     #   通常等于或略大于 bm25/vector 的较小者
     rerank_top_k: int = field(
-        default_factory=lambda: int(os.getenv("RERANK_TOP_K", "20"))
+        default_factory=lambda: int(os.getenv("RERANK_TOP_K", "40"))
     )
     # Rerank 精排后最终保留数：直接喂给 LLM 的法条数量
     #   调大 → LLM 看到更多法条依据，回答更全面，但 token 成本增加、可能引入干扰
@@ -172,6 +185,19 @@ class Settings:
     #   调大 → 排名靠后的结果也有一定权重（更平均）
     rrf_constant: int = field(
         default_factory=lambda: int(os.getenv("RRF_CONSTANT", "60"))
+    )
+    # 跨法律覆盖选择：rerank 后先为不同法律来源保留少量名额，再按分数填充
+    enable_source_coverage_selection: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_SOURCE_COVERAGE_SELECTION", "true").lower() == "true"
+    )
+    source_coverage_candidate_k: int = field(
+        default_factory=lambda: int(os.getenv("SOURCE_COVERAGE_CANDIDATE_K", "40"))
+    )
+    source_coverage_max_sources: int = field(
+        default_factory=lambda: int(os.getenv("SOURCE_COVERAGE_MAX_SOURCES", "6"))
+    )
+    source_coverage_per_source: int = field(
+        default_factory=lambda: int(os.getenv("SOURCE_COVERAGE_PER_SOURCE", "1"))
     )
     # 前后条扩展范围：检索到某条后自动补充相邻 N 条作为上下文
     #   调大 → 上下文更完整（如第3条引用第2条时能找到），但 token 增加
@@ -362,8 +388,10 @@ class Settings:
 
     # --- 热更新白名单 ---
     HOT_RELOADABLE_FIELDS = {
-        "bm25_top_k", "vector_top_k", "rerank_final_k",
+        "bm25_top_k", "bm25_per_law_k", "vector_top_k", "rerank_final_k",
         "enable_rerank", "adjacent_range",
+        "enable_source_coverage_selection", "source_coverage_candidate_k",
+        "source_coverage_max_sources", "source_coverage_per_source",
         "enable_weighted_merge", "enable_intelligent_expansion",
         "expansion_depth", "enable_semantic_verification",
         "enable_interpretation_retrieval", "interpretation_top_k",
