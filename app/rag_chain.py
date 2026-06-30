@@ -87,13 +87,17 @@ _ANSWER_RISK_MARKERS = (
 
 _ANSWER_BRACKET_CITATION_RE = re.compile(
     r"《([^》]+)》\s*"
-    r"(第[一二三四五六七八九十百千万0-9]+条(?:之[一二三四五六七八九十]+)?)"
+    r"(第[零一二三四五六七八九十百千万0-9]+条(?:之[零一二三四五六七八九十]+)?)"
+)
+
+_ANSWER_ARTICLE_RE = re.compile(
+    r"第[零一二三四五六七八九十百千万0-9]+条(?:之[零一二三四五六七八九十]+)?"
 )
 
 _ANSWER_BARE_CITATION_RE = re.compile(
     r"(中华人民共和国)?"
     r"(刑法|民法典|公司法|劳动合同法|劳动争议调解仲裁法|民事诉讼法|反电信网络诈骗法)"
-    r"\s*(第[一二三四五六七八九十百千万0-9]+条(?:之[一二三四五六七八九十]+)?)"
+    r"\s*(第[零一二三四五六七八九十百千万0-9]+条(?:之[零一二三四五六七八九十]+)?)"
 )
 
 
@@ -205,9 +209,16 @@ def _citation_supported(
 
 def _extract_answer_citations(line: str) -> list[tuple[str, str]]:
     citations = list(_ANSWER_BRACKET_CITATION_RE.findall(line or ""))
+    for law_match in re.finditer(r"《([^》]+)》", line or ""):
+        segment = (line or "")[law_match.end():]
+        next_law = segment.find("《")
+        if next_law >= 0:
+            segment = segment[:next_law]
+        for article_match in _ANSWER_ARTICLE_RE.findall(segment):
+            citations.append((law_match.group(1), article_match))
     for prefix, law, article in _ANSWER_BARE_CITATION_RE.findall(line or ""):
         citations.append((f"{prefix or ''}{law}", article))
-    return citations
+    return list(dict.fromkeys(citations))
 
 
 def _sanitize_answer_against_retrieval(answer_text: str, generation_docs: list) -> str:
@@ -319,6 +330,7 @@ QA_SHARED_GUARDRAILS = """\
 - 如果判断需要某个关键法条但“相关法律条文”没有提供，不要写该法条名称、条号或由其推出的结论。
 - 不要提及未检索到的具体法律名称、司法解释名称、监管文件名称或条号；只能概括为“可能还需补充相关规定”。
 - 如果问题涉及多部法律，必须在“法律依据与分析”中分别覆盖每部与问题直接相关的法律；不要只回答主法律而遗漏程序法、责任法或特别法。
+- 对跨法律问题，先从“相关法律条文”的来源名称识别可用法律；凡与用户事实直接相关的法律，必须在某个编号点的“依据”中显式写出法律名称和条号。
 - 如果检索上下文包含某部法律但该法律与问题事实不直接相关，可以明确说明“不作为主要依据”，不要为了覆盖而强行适用。
 - 加粗只用于结论、罪名、责任类型、时限、金额区间等分析重点，避免整段加粗。
 - 刑事量刑只给可能区间和影响因素，不承诺确定刑期；注意区分生活表述与法定概念。对“入室/入户”等概念，先提示需确认场所性质。

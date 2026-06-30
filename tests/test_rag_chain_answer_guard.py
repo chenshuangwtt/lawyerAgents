@@ -20,6 +20,25 @@ def test_sanitize_answer_keeps_supported_citation():
     assert result == answer
 
 
+def test_sanitize_answer_catches_chained_articles_after_law_name():
+    docs = [
+        Document(
+            page_content="第一千零八十四条父母与子女间的关系，不因父母离婚而消除。",
+            metadata={
+                "source": "中华人民共和国民法典",
+                "article_numbers_int": "1084",
+            },
+        )
+    ]
+    answer = "依据《民法典》第一千零七十九条、第一千零八十四条，可以处理离婚和子女抚养。"
+
+    result = _sanitize_answer_against_retrieval(answer, docs)
+
+    assert "第一千零七十九条" not in result
+    assert "第一千零八十四条" not in result
+    assert "当前检索依据不足" not in result
+
+
 def test_sanitize_answer_replaces_unsupported_citation_and_risk_marker():
     docs = [
         Document(

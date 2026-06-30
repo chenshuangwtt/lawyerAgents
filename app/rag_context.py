@@ -216,6 +216,24 @@ def build_structured_context_text(trace: Dict, case_context: str = "") -> str:
         ("【司法解释】", trace.get("interpretation_docs", [])),
     ]
     parts = []
+    source_articles: dict[str, list[str]] = {}
+    for _, docs in sections:
+        for doc in docs or []:
+            source = doc.metadata.get("source", "未知法律")
+            article = doc.metadata.get("article", "")
+            if not source:
+                continue
+            articles = source_articles.setdefault(source, [])
+            if article and article not in articles:
+                articles.append(article)
+    if source_articles:
+        overview = []
+        for source, articles in source_articles.items():
+            article_text = "、".join(articles[:8])
+            suffix = f"：{article_text}" if article_text else ""
+            overview.append(f"- {source}{suffix}")
+        parts.append("【可用法律来源概览】\n" + "\n".join(overview))
+
     index = 1
     for title, docs in sections:
         docs = docs or []

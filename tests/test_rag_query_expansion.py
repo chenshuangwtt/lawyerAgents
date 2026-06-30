@@ -43,6 +43,58 @@ def test_build_retrieval_query_adds_telefraud_account_hints():
     assert "调取证据" in query
 
 
+def test_build_retrieval_query_adds_trade_secret_hints_for_client_list():
+    query = build_retrieval_query("离职高管带走客户名单另开公司，原公司可以追责吗？", "商事", [])
+
+    assert "反不正当竞争法 第十条" in query
+    assert "劳动合同法 第二十三条" in query
+    assert "劳动合同法 第二十四条" in query
+    assert "公司法 第一百八十条" in query
+    assert "公司法 第一百八十一条" in query
+
+
+def test_build_retrieval_query_adds_trade_secret_hints_for_departing_employee():
+    query = build_retrieval_query("公司离职员工带走客户个人信息另行营销，涉及哪些法律责任？", "网络与数据", [])
+
+    assert "反不正当竞争法 第十条" in query
+    assert "劳动合同法 第二十三条" in query
+    assert "劳动合同法 第二十四条" in query
+    assert "个人信息保护法 第二条" in query
+    assert "个人信息保护法 第六十六条" in query
+    assert "公司法 第一百八十条" not in query
+    assert "公司法 第一百八十一条" not in query
+
+
+def test_build_retrieval_query_adds_civil_code_hints_for_personal_info():
+    query = build_retrieval_query("App未经同意读取通讯录并向第三方推送广告，用户可以要求删除和赔偿吗？", "网络与数据", [])
+
+    assert "民法典 第一千零三十四条" in query
+    assert "民法典 第一千零三十五条" in query
+    assert "民法典 第一千零三十六条" in query
+    assert "个人信息保护法 第四条" in query
+
+
+def test_build_retrieval_query_adds_criminal_data_hints_for_deleted_system_data():
+    query = build_retrieval_query("员工离职后带走客户资料并删除公司系统数据，公司能要求赔偿并报警吗？", "商事", [])
+
+    assert "反不正当竞争法 第十条" in query
+    assert "刑法 第二百五十三条之一" in query
+    assert "刑法 第二百八十五条" in query
+    assert "刑法 第二百八十六条" in query
+
+
+def test_build_retrieval_query_does_not_trigger_hints_from_law_names_only():
+    query = build_retrieval_query(
+        "法定代表人超越内部授权签订担保合同，公司能否拒绝承担责任？",
+        "商事",
+        ["中华人民共和国个人信息保护法", "中华人民共和国刑法"],
+    )
+
+    assert "公司法 第十六条" in query
+    assert "个人信息保护法 第二条" not in query
+    assert "刑法 第二百八十五条" not in query
+
+
 def test_build_retrieval_query_adds_enforcement_transfer_hints():
     query = build_retrieval_query("申请强制执行后发现被执行人转移财产，可以要求法院采取哪些措施？", "民事诉讼", [])
 

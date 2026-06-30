@@ -72,6 +72,49 @@ _RULES: tuple[RetrievalHintRule, ...] = (
         ),
     ),
     RetrievalHintRule(
+        any_terms=("客户名单", "客户资料", "客户信息", "商业秘密", "经营信息", "竞争对手"),
+        hints=(
+            "反不正当竞争法 第十条 侵犯商业秘密 披露 使用 客户名单 经营信息",
+            "劳动合同法 第二十三条 保守商业秘密 保密事项 竞业限制",
+            "劳动合同法 第二十四条 高级管理人员 保密义务 竞业限制",
+        ),
+    ),
+    RetrievalHintRule(
+        any_terms=("离职高管", "高管", "董事", "监事", "高级管理人员", "董监高"),
+        hints=(
+            "公司法 第一百八十条 董事 监事 高级管理人员 忠实义务 勤勉义务",
+            "公司法 第一百八十一条 擅自披露公司秘密",
+        ),
+    ),
+    RetrievalHintRule(
+        any_terms=("离职员工", "离职高管", "保密协议", "保密义务", "竞业限制"),
+        hints=(
+            "劳动合同法 第二十三条 商业秘密 保密协议 竞业限制 违约金",
+            "劳动合同法 第二十四条 竞业限制人员 范围 地域 期限",
+            "反不正当竞争法 第十条 员工 前员工 侵犯商业秘密",
+        ),
+    ),
+    RetrievalHintRule(
+        any_terms=("个人信息", "客户个人信息", "客户手机号", "联系方式", "通讯录"),
+        hints=(
+            "个人信息保护法 第二条 个人信息权益",
+            "个人信息保护法 第四条 个人信息 处理 收集 存储 使用 删除",
+            "个人信息保护法 第十三条 处理个人信息 合法事由",
+            "个人信息保护法 第六十六条 违法处理个人信息 法律责任",
+            "民法典 第一千零三十四条 个人信息 定义",
+            "民法典 第一千零三十五条 处理个人信息 合法 正当 必要 同意",
+            "民法典 第一千零三十六条 处理个人信息 免责情形",
+        ),
+    ),
+    RetrievalHintRule(
+        any_terms=("删除", "系统数据", "导出", "公司系统", "非法获取"),
+        hints=(
+            "刑法 第二百五十三条之一 侵犯公民个人信息 非法获取 出售 提供",
+            "刑法 第二百八十五条 非法获取计算机信息系统数据",
+            "刑法 第二百八十六条 删除 修改 计算机信息系统数据",
+        ),
+    ),
+    RetrievalHintRule(
         any_terms=("未成年人", "孩子", "家长"),
         all_terms=("充值",),
         hints=(
@@ -114,7 +157,7 @@ def _dedupe(items: Iterable[str]) -> list[str]:
 def build_retrieval_query(question: str, domain: str = "", law_names: list[str] | None = None) -> str:
     """Append legal issue hints used only for retrieval/rerank, not generation."""
     base = str(question or "").strip()
-    haystack = " ".join([base, str(domain or ""), " ".join(law_names or [])])
+    haystack = " ".join([base, str(domain or "")])
     hints: list[str] = []
     for rule in _RULES:
         if _matches_rule(haystack, rule):

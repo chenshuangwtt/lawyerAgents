@@ -88,6 +88,9 @@ def test_build_structured_context_text_separates_law_support_and_interpretation(
 
     context = build_structured_context_text(trace, "【参考案例】\n案例标题：某案")
 
+    assert "【可用法律来源概览】" in context
+    assert "- 中华人民共和国刑法：第二百六十四条、第六十七条" in context
+    assert "- 最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释：第一条" in context
     assert "【主法条】" in context
     assert "【补充条文】" in context
     assert "【司法解释】" in context
