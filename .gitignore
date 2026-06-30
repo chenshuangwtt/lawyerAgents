@@ -48,6 +48,25 @@ Thumbs.db
 
 # 评测运行输出
 eval/results.jsonl
+eval/eval_results.jsonl
+eval/retrieval_report.md
+eval/*_results.jsonl
+eval/*_report.md
+eval/*_answer_report.md
+eval/*_retrieval_report.md
+eval/*_ragas*.json
+eval/*_ragas*.jsonl
+eval/*_ragas*.md
+eval/*_after_*.jsonl
+eval/*_miss_*.jsonl
+eval/*_timeout_*.jsonl
+eval/questions_5*.jsonl
+eval/questions_15*.jsonl
+eval/questions_30*.jsonl
+eval/questions_answer_quality_*.jsonl
+!eval/baseline_30_retrieval_results.jsonl
+!eval/baseline_report.md
+!eval/questions_answer_quality_smoke_8_articles.jsonl
 
 # 脚本
 _*.py
