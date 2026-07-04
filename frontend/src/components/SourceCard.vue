@@ -1,72 +1,135 @@
 <script setup>
-const props = defineProps({ sources: Array })
+import { computed } from 'vue'
 
-function parseSource(raw) {
-  const spaceIdx = raw.indexOf(' ')
-  if (spaceIdx === -1) return { law: raw, articles: '' }
+const props = defineProps({
+  sources: { type: Array, default: () => [] },
+})
+
+function parseLegacySource(raw) {
+  const text = String(raw || '').trim()
+  const articleMatch = text.match(/第[一二三四五六七八九十百千万亿零〇两\d]+条(?:之[一二三四五六七八九十百千万亿零〇两\d]+)?(?:第[一二三四五六七八九十百千万亿零〇两\d]+款)?/)
+  if (!articleMatch) return { law_name: text, article_no: '', title: text }
+  const law = text.slice(0, articleMatch.index).trim()
   return {
-    law: raw.slice(0, spaceIdx),
-    articles: raw.slice(spaceIdx + 1),
+    law_name: law || text,
+    article_no: articleMatch[0],
+    title: text,
   }
 }
 
-// 法律名称 → 国家法律法规数据库搜索链接
+function sourceText(source) {
+  return String(
+    source.text
+    || source.full_content
+    || source.content
+    || source.metadata?.content
+    || '',
+  ).replace(/\s+/g, ' ').trim()
+}
+
+function normalizeSource(source, index) {
+  const raw = typeof source === 'object' && source !== null
+    ? source
+    : parseLegacySource(source)
+  const legacy = parseLegacySource(raw.source || raw.title || '')
+  const lawName = raw.law_name || legacy.law_name || raw.source || '未知来源'
+  const articleNo = raw.article_no || raw.article || legacy.article_no || raw.metadata?.article || ''
+  const text = sourceText(raw)
+  return {
+    id: raw.source_id || `${lawName}-${articleNo}-${index}`,
+    source_type: raw.source_type || raw.metadata?.source_type || 'unknown',
+    law_name: lawName,
+    article_no: articleNo,
+    clause_no: raw.clause_no || '',
+    title: raw.title || [lawName, articleNo].filter(Boolean).join(' ') || legacy.title || '未知来源',
+    text,
+    snippet: text ? text.slice(0, 220) : '暂无片段',
+    confidence: raw.confidence ?? '',
+    file_path: raw.file_path || raw.metadata?.file_path || '',
+  }
+}
+
+const cards = computed(() => (props.sources || []).map(normalizeSource))
+
 function lawUrl(name) {
   return `https://www.baidu.com/s?wd=${encodeURIComponent(name + ' site:flk.npc.gov.cn')}`
 }
 
-const confidenceConfig = {
-  high:    { label: '高', tip: '引用与回答语义高度匹配', class: 'bg-emerald-50 text-emerald-600 border-emerald-200' },
-  medium:  { label: '中', tip: '引用与回答部分相关',     class: 'bg-amber-50 text-amber-600 border-amber-200' },
-  low:     { label: '低', tip: '引用与回答相关性较弱',   class: 'bg-red-50 text-red-500 border-red-200' },
-  suggested: { label: '补', tip: '可能遗漏的相关法条',   class: 'bg-violet-50 text-violet-600 border-violet-200 border-dashed' },
+const typeLabel = {
+  statute: '法律法规',
+  interpretation: '司法解释',
+  case: '案例',
+  user_document: '用户文档',
+  unknown: '未知',
 }
 
-const priority = { high: 3, medium: 2, low: 1, suggested: 0 }
+function confidenceLabel(value) {
+  if (value === null || value === undefined || value === '') return ''
+  if (typeof value === 'number') return value.toFixed(2)
+  const labels = { high: '高', medium: '中', low: '低', suggested: '补充' }
+  return labels[value] || String(value)
+}
 
-// 按法律名分组，合并条号，附带置信度
-function grouped() {
-  const map = new Map()
-  for (const s of props.sources) {
-    const { law, articles } = parseSource(s.source)
-    if (!map.has(law)) map.set(law, { articles: [], confidence: '' })
-    if (articles) map.get(law).articles.push(articles)
-    // 取组内最高置信度
-    const c = s.confidence || ''
-    const cur = map.get(law).confidence
-    if (c && (!cur || (priority[c] || 0) > (priority[cur] || 0))) {
-      map.get(law).confidence = c
-    }
-  }
-  return [...map.entries()]
-    .map(([law, { articles, confidence }]) => ({
-      law,
-      articles: [...new Set(articles.flatMap(a => a.split('、')))].join('、'),
-      confidence,
-    }))
-    .sort((a, b) => (priority[b.confidence] || 0) - (priority[a.confidence] || 0))
+function confidenceClass(value) {
+  if (value === 'high' || Number(value) >= 0.8) return 'bg-emerald-50 text-emerald-700 ring-emerald-200'
+  if (value === 'medium' || Number(value) >= 0.5) return 'bg-amber-50 text-amber-700 ring-amber-200'
+  if (value === 'low' || (value !== '' && Number(value) < 0.5)) return 'bg-red-50 text-red-600 ring-red-200'
+  if (value === 'suggested') return 'bg-violet-50 text-violet-700 ring-violet-200'
+  return 'bg-gray-50 text-gray-500 ring-gray-200'
 }
 </script>
 
 <template>
-  <div class="flex flex-wrap gap-1.5">
-    <span
-      v-for="(g, i) in grouped()"
-      :key="i"
-      class="inline-flex items-center gap-1 bg-blue-50/80 text-blue-600 rounded-md px-2 py-1 text-xs border border-blue-100/60"
-    >
-      <svg class="w-3 h-3 text-blue-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+  <section class="space-y-2">
+    <div class="flex items-center gap-1.5 px-1">
+      <svg class="h-4 w-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
       </svg>
-      <a :href="lawUrl(g.law)" target="_blank" rel="noopener noreferrer"
-         class="font-medium hover:underline decoration-blue-300 underline-offset-2">{{ g.law }}</a>
-      <span v-if="g.articles" class="text-blue-400 max-w-48 truncate">{{ g.articles }}</span>
-      <span
-        v-if="g.confidence && confidenceConfig[g.confidence]"
-        class="ml-0.5 px-1 py-0.5 rounded text-[10px] font-medium border leading-none cursor-help"
-        :class="confidenceConfig[g.confidence].class"
-        :title="confidenceConfig[g.confidence].tip"
-      >{{ confidenceConfig[g.confidence].label }}</span>
-    </span>
-  </div>
+      <span class="text-xs font-semibold text-gray-600">检索来源</span>
+      <span class="text-[11px] text-gray-400">{{ cards.length }} 条</span>
+    </div>
+
+    <div class="grid grid-cols-1 gap-2">
+      <article
+        v-for="card in cards"
+        :key="card.id"
+        class="rounded-xl border border-gray-200 bg-white px-3 py-3 shadow-sm"
+      >
+        <div class="flex flex-wrap items-start gap-2">
+          <a
+            :href="lawUrl(card.law_name)"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="min-w-0 flex-1 text-xs font-semibold leading-5 text-blue-700 hover:underline"
+          >
+            {{ card.law_name }}
+          </a>
+          <span class="rounded-md bg-gray-50 px-1.5 py-0.5 text-[11px] font-medium text-gray-500 ring-1 ring-gray-200">
+            {{ typeLabel[card.source_type] || card.source_type }}
+          </span>
+          <span
+            v-if="confidenceLabel(card.confidence)"
+            class="rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1"
+            :class="confidenceClass(card.confidence)"
+          >
+            {{ confidenceLabel(card.confidence) }}
+          </span>
+        </div>
+
+        <div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-gray-500">
+          <span v-if="card.article_no" class="rounded bg-blue-50 px-1.5 py-0.5 font-medium text-blue-600">{{ card.article_no }}</span>
+          <span v-if="card.clause_no" class="rounded bg-blue-50 px-1.5 py-0.5 font-medium text-blue-600">{{ card.clause_no }}</span>
+          <span v-if="card.title && card.title !== card.law_name" class="min-w-0 truncate">{{ card.title }}</span>
+        </div>
+
+        <p class="mt-2 text-xs leading-relaxed text-gray-600">
+          {{ card.snippet }}
+        </p>
+
+        <div v-if="card.file_path" class="mt-2 truncate text-[11px] text-gray-400">
+          {{ card.file_path }}
+        </div>
+      </article>
+    </div>
+  </section>
 </template>

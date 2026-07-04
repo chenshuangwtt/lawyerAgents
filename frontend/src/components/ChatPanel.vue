@@ -44,6 +44,30 @@ function onDomainClick(d) {
   onSuggestion(q)
 }
 
+function normalizeSubstep(data, fallbackStatus = '') {
+  return {
+    step: data?.step || 'unknown',
+    label: data?.label || '',
+    status: data?.status || fallbackStatus || 'done',
+    duration_ms: Number(data?.duration_ms ?? data?.elapsed_ms ?? 0) || 0,
+    input_count: Number(data?.input_count || 0) || 0,
+    output_count: Number(data?.output_count || 0) || 0,
+    message: data?.message || data?.detail || '',
+    domain: data?.domain || '',
+  }
+}
+
+function upsertSubstep(msg, data, fallbackStatus = '') {
+  if (!msg) return
+  const next = normalizeSubstep(data, fallbackStatus)
+  const index = msg.substeps.findIndex(item => item.step === next.step)
+  if (index >= 0) {
+    msg.substeps[index] = { ...msg.substeps[index], ...next }
+  } else {
+    msg.substeps.push(next)
+  }
+}
+
 // --- 智能滚动 ---
 function chatEl() { return document.getElementById('chat-list') }
 
@@ -161,17 +185,15 @@ async function onSend() {
       onSubstep(data) {
         const msg = props.messages[msgIndex]
         if (msg) {
-          msg.substeps.push({
-            step: data.step || '',
-            elapsed_ms: data.elapsed_ms || 0,
-            detail: data.detail || '',
-            domain: data.domain || '',
-          })
+          upsertSubstep(msg, data)
           // substep 更新时也滚动
           if (atBottom.value) requestAnimationFrame(scrollBottom)
         }
       },
-      onSourcesPreview() {},
+      onSourcesPreview(data) {
+        const msg = props.messages[msgIndex]
+        if (msg && data.sources?.length) msg.sources = data.sources
+      },
       onSourcesReady(data) {
         const msg = props.messages[msgIndex]
         if (msg) {
@@ -191,6 +213,9 @@ async function onSend() {
       onToken(data) {
         const msg = props.messages[msgIndex]
         if (msg) {
+          if (!msg.substeps.some(item => item.step === 'generate')) {
+            upsertSubstep(msg, { step: 'generate', label: '生成回答', status: 'started', message: '正在生成回答' })
+          }
           msg.content += data.content
           // 流式期间持续滚动（用 rAF 确保在 DOM 更新后执行）
           if (atBottom.value) requestAnimationFrame(scrollBottom)
@@ -214,12 +239,15 @@ async function onSend() {
           if (data.domain) msg.domain = data.domain
           if (data.domains) msg.domains = data.domains
           else if (data.domain && (!msg.domains || msg.domains.length === 0)) msg.domains = [data.domain]
+          if (data.timings) msg.timings = data.timings
+          upsertSubstep(msg, { step: 'generate', label: '生成回答', status: 'done', message: '回答生成完成' })
           msg.streaming = false
         }
       },
-      onError(message) {
+      onError(message, data = {}) {
         const msg = props.messages[msgIndex]
         if (msg) {
+          upsertSubstep(msg, { step: data.step || 'generate', status: 'failed', message: message || '服务暂时不可用' })
           msg.content = message || '服务暂时不可用，请稍后重试'
           msg.streaming = false
         }
@@ -292,15 +320,21 @@ function onGenerateDocument({ document_type, doc_type, action, source, case_anal
     onSubstep(data) {
       const msg = props.messages[msgIndex]
       if (msg) {
-        msg.substeps.push({ step: data.step || '', elapsed_ms: data.elapsed_ms || 0, detail: data.detail || '' })
+        upsertSubstep(msg, data)
         if (atBottom.value) requestAnimationFrame(scrollBottom)
       }
     },
-    onSourcesPreview() {},
+    onSourcesPreview(data) {
+      const msg = props.messages[msgIndex]
+      if (msg && data.sources?.length) msg.sources = data.sources
+    },
     onSourcesReady() {},
     onToken(data) {
       const msg = props.messages[msgIndex]
       if (msg) {
+        if (!msg.substeps.some(item => item.step === 'generate')) {
+          upsertSubstep(msg, { step: 'generate', label: '生成回答', status: 'started', message: '正在生成文书' })
+        }
         msg.content += data.content
         if (atBottom.value) requestAnimationFrame(scrollBottom)
       }
@@ -312,14 +346,16 @@ function onGenerateDocument({ document_type, doc_type, action, source, case_anal
           msg.risk_warning = data.risk_warning || ''
           if (data.document_result) msg.document_result = data.document_result
           if (data.missing_fields) msg.missing_fields = data.missing_fields
+          upsertSubstep(msg, { step: 'generate', label: '生成回答', status: 'done', message: '文书生成完成' })
           msg.streaming = false
         }
       loading.value = false
       emit('messageSent')
     },
-    onError(message) {
+    onError(message, data = {}) {
       const msg = props.messages[msgIndex]
       if (msg) {
+        upsertSubstep(msg, { step: data.step || 'generate', status: 'failed', message: message || '文书生成失败' })
         msg.content = message || '文书生成失败，请稍后重试'
         msg.streaming = false
       }

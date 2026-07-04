@@ -117,15 +117,76 @@ LLM 生成阶段要求模型基于检索上下文回答，不应凭空扩展事�
 
 系统通过 SSE 让前端实时展示生成过程。常见事件包括：
 
-- `meta`：领域、是否缓存命中、多域标记。
-- `substep`：pipeline 阶段进度，例如分类、检索、精排、扩展、生成。
+- `meta`：领域、是否缓存命中、多域标记、意图和文书类型。
+- `substep`：pipeline 阶段进度，例如分类、Query Rewrite、BM25 检索、向量检索、RRF 融合、精排、上下文扩展、引用校验和生成。
 - `token`：模型生成内容。
 - `done`：sources、risk_warning、timings、record_id。
 - `error`：错误信息。
 
+`substep` 的标准数据结构：
+
+```json
+{
+  "step": "bm25_retrieve",
+  "label": "BM25 检索",
+  "status": "done",
+  "duration_ms": 42,
+  "input_count": 1,
+  "output_count": 12,
+  "message": "关键词检索完成"
+}
+```
+
+`status` 取值：
+
+- `started`：阶段进行中。
+- `done`：阶段已完成。
+- `failed`：阶段失败。
+
+`done` 事件会携带最终结构化结果：
+
+```json
+{
+  "sources": [],
+  "risk_warning": "",
+  "timings": {},
+  "domain": "劳动",
+  "record_id": 123
+}
+```
+
+`error` 事件应包含 `step` 和可读 `message`，前端会将对应步骤标记为失败。
+
 SSE 设计便于演示，也便于用户感知长回答生成过程。
 
-## 10. 性能优化点
+## 10. 前端 RAG 展示
+
+Vue3 前端会解析 `meta / substep / token / done / error` 事件，并保持 Markdown 正文流式渲染。
+
+前端 RAG 过程面板展示以下阶段：
+
+- 问题分类
+- Query Rewrite
+- BM25 检索
+- 向量检索
+- RRF 融合
+- Rerank 精排
+- 上下文扩展
+- 引用校验
+- 生成回答
+
+每个阶段显示状态、耗时和简短消息。`risk_warning` 存在时会以醒目的风险提示块展示。
+
+来源卡片兼容旧字符串来源和新的 `SourceItem` 结构，优先展示：
+
+- 法律名称
+- 条号 / 款号
+- 来源片段
+- `source_type`
+- `confidence`
+- 文件路径或来源元数据
+
+## 11. 性能优化点
 
 - 语义缓存：重复或相似问题优先命中缓存。
 - Rerank top_k 控制：减少进入 LLM 的无关上下文。

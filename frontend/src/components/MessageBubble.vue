@@ -2,6 +2,7 @@
 import { computed, inject, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
+import RagProgress from './RagProgress.vue'
 import SourceCard from './SourceCard.vue'
 
 const props = defineProps({
@@ -165,7 +166,15 @@ const hasDocumentResult = computed(() => {
     && !!props.document_result
     && props.document_result.status !== 'unsupported'
 })
-const missingFieldSet = computed(() => new Set(props.missing_fields || props.document_result?.missing_fields || []))
+function missingFieldName(item) {
+  if (typeof item === 'string') return item
+  return item?.field_name || ''
+}
+
+const missingFieldSet = computed(() => {
+  const raw = props.missing_fields?.length ? props.missing_fields : props.document_result?.missing_fields || []
+  return new Set(raw.map(missingFieldName).filter(Boolean))
+})
 
 function fieldValue(key) {
   const value = editableDocFields.value[key]
@@ -500,22 +509,6 @@ function toggleCase(ci) {
   expandedCases.value[ci] = !expandedCases.value[ci]
 }
 
-function stepLabel(step) {
-  const labels = {
-    classify: '分类',
-    retrieve: '检索',
-    rerank: '精排',
-    expand: '扩展',
-    merge: '合并',
-    generate: '生成',
-    sub_questions: '拆题',
-    sub_question: '拆题',
-    contextualize: '重写',
-    decompose: '案情拆解',
-    cross_analyze: '交叉分析',
-  }
-  return labels[step] || step
-}
 </script>
 
 <template>
@@ -567,18 +560,8 @@ function stepLabel(step) {
         <span class="text-xs text-gray-300 ml-auto">{{ time }}</span>
       </div>
 
-      <!-- 进度时间线 -->
-      <div v-if="substeps.length > 0" class="flex items-center gap-1 mb-2 flex-wrap">
-        <template v-for="(s, si) in substeps" :key="si">
-          <span
-            class="text-xs px-1.5 py-0.5 rounded-md"
-            :class="s.step === 'generate' && streaming ? 'bg-blue-50 text-blue-500 animate-pulse' : 'bg-gray-100 text-gray-400'"
-          >
-            {{ stepLabel(s.step) }} {{ s.elapsed_ms > 0 ? (s.elapsed_ms / 1000).toFixed(1) + 's' : '' }}
-          </span>
-          <span v-if="si < substeps.length - 1" class="text-gray-300 text-xs">→</span>
-        </template>
-      </div>
+      <!-- RAG 过程 -->
+      <RagProgress :substeps="substeps" :streaming="streaming" />
 
       <!-- 文书结果：表单字段版 / 预览版 -->
       <div v-if="hasDocumentResult" class="bg-gray-50 rounded-2xl rounded-tl-md px-5 py-4 text-sm leading-relaxed border border-gray-100">
@@ -687,8 +670,21 @@ function stepLabel(step) {
         <div class="prose prose-sm max-w-none prose-p:my-2 prose-li:my-1 prose-headings:font-semibold prose-strong:text-gray-800" v-html="html" />
       </div>
 
+      <!-- 风险提示 -->
+      <div v-if="risk_warning" class="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-amber-800 shadow-sm">
+        <div class="flex items-start gap-2">
+          <svg class="mt-0.5 h-4 w-4 shrink-0 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+          </svg>
+          <div class="min-w-0">
+            <div class="text-xs font-semibold">风险提示</div>
+            <div class="mt-0.5 text-xs leading-relaxed">{{ risk_warning }}</div>
+          </div>
+        </div>
+      </div>
+
       <!-- 法条来源 -->
-      <div v-if="sources.length > 0 && !isOutOfScope" class="mt-2">
+      <div v-if="sources.length > 0 && !isOutOfScope" class="mt-3">
         <SourceCard :sources="sources" />
       </div>
 
@@ -754,14 +750,6 @@ function stepLabel(step) {
             <div v-if="!expandedCases[ci] && (caseKeywords(c) || c.dispute_focus || c.court_reasoning || c.judgment_reason || c.source_url)" class="text-xs text-indigo-400 mt-1">点击展开详情</div>
           </div>
         </div>
-      </div>
-
-      <!-- 风险提示 -->
-      <div v-if="risk_warning" class="mt-2 flex items-start gap-1.5 px-1">
-        <svg class="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/>
-        </svg>
-        <span class="text-xs text-gray-400 leading-relaxed">{{ risk_warning }}</span>
       </div>
 
       <!-- 案情分析后的快捷操作 -->

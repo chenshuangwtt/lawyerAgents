@@ -31,7 +31,7 @@ RAG 项目的核心问题不是“能不能回答”，而是回答是否建立�
 建议使用 JSONL，每行一个问题：
 
 ```json
-{"id":"labor_001","question":"试用期最长可以约定多久？","domain":"劳动","expected_laws":["劳动合同法"],"type":"qa"}
+{"id":"labor_001","question":"试用期最长可以约定多久？","domain":"劳动","expected_laws":["劳动合同法"],"expected_articles":["劳动合同法第十九条"],"type":"qa","difficulty":"easy","tags":["试用期","劳动合同"]}
 ```
 
 字段说明：
@@ -40,7 +40,10 @@ RAG 项目的核心问题不是“能不能回答”，而是回答是否建立�
 - `question`：用户问题。
 - `domain`：期望领域。
 - `expected_laws`：期望检索命中的法律。
+- `expected_articles`：期望检索命中的法条，统一使用“法律名+第X条”格式，例如 `劳动合同法第十九条`。旧数据没有该字段时评测脚本会兼容，不计入条文命中率分母。
 - `type`：问题类型，例如 `qa`、`analysis`、`statute`、`document`。
+- `difficulty`：问题难度，取值为 `easy`、`medium`、`hard`。
+- `tags`：问题标签，用于标记风险点、业务场景或容易出错的召回类型。
 
 ## 4. 推荐评测维度
 
@@ -52,9 +55,19 @@ RAG 项目的核心问题不是“能不能回答”，而是回答是否建立�
 - 刑事
 - 公司
 - 民事诉讼
+- 治安/行政
 - 跨领域问题
 
 跨领域问题尤其重要，例如劳动 + 刑事、婚姻 + 治安 + 民事诉讼、公司 + 合同等场景。
+
+当前 `eval/questions.jsonl` 已扩展到 60 条，重点加入以下容易出错的问题类型：
+
+- 赔偿金额不能绝对化。
+- 刑民交叉。
+- 劳动争议和商业秘密交叉。
+- 彩礼返还。
+- 未成年人刑责。
+- 诉讼时效/仲裁时效。
 
 ## 5. 如何运行本地评测
 
@@ -97,8 +110,19 @@ python eval/run_eval.py --api-key your-chat-api-key
 - `latency_ms`
 - `error`
 - `hit_expected_laws`
+- `hit_expected_articles`
+- `citation_supported_rate`
+- `domain_hit`
+- `missing_expected_laws`
+- `missing_expected_articles`
 
 `hit_expected_laws` 只检查 `expected_laws` 是否出现在 `sources` 文本中，不等价于完整法律结论正确。它适合作为最小回归指标，用来观察检索和引用是否明显退化。
+
+`hit_expected_articles` 检查 `expected_articles` 是否能在 `sources` 中找到对应法律和条号。由于部分问题可能存在多个可替代依据，`expected_articles` 不要求覆盖全部可能法条，只作为召回基线。
+
+`citation_supported_rate` 检查回答正文中显式出现的“法名 + 条号”引用，有多少能在 `sources` 中找到。该指标不依赖外部 LLM Judge。
+
+`eval/report.md` 会输出总览表、分领域表、失败样例列表和高延迟样例列表。失败样例包含 `id`、`question`、`expected_laws`、`actual_sources`、`error` 或 miss reason，便于定位召回、排序、引用或领域分类问题。
 
 ## 6. 后续计划
 

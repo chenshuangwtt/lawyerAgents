@@ -47,9 +47,12 @@ def serialize_sse_event(event: StreamEvent) -> str:
     if event.type == "token":
         return _sse("token", {"content": event.payload.get("content", "")})
     if event.type == "error":
-        return _sse("error", {"message": event.payload.get("message", "服务内部错误，请稍后重试")})
+        return _sse("error", {
+            "step": event.payload.get("step", "unknown"),
+            "message": event.payload.get("message", "服务内部错误，请稍后重试"),
+        })
     if event.type == "substep":
-        return _sse("substep", event.payload)
+        return _sse("substep", normalize_substep_payload(event.payload))
     if event.type == "sources_preview":
         return _sse("sources_preview", {"sources": event.payload.get("sources", [])})
     if event.type == "sources_ready":
@@ -58,6 +61,8 @@ def serialize_sse_event(event: StreamEvent) -> str:
             "risk_warning": event.payload.get("risk_warning", ""),
             "case_results": event.payload.get("case_results", []),
         }
+        if "citation_verification" in event.payload:
+            data["citation_verification"] = event.payload["citation_verification"]
         case_state = event.payload.get("case_state")
         if isinstance(case_state, dict):
             data["case_state"] = case_state
@@ -86,17 +91,60 @@ def build_done_payload(event_payload: dict[str, Any]) -> dict[str, Any]:
         "case_results",
         "case_state",
         "case_analysis_id",
+        "analysis_result",
+        "analysis_markdown",
         "doc_type",
         "status",
+        "legacy_status",
         "missing_fields",
+        "missing_field_names",
+        "clarification_questions",
         "extracted_fields",
         "document_result",
         "warnings",
+        "citation_verification",
+        "timings",
         "cached",
     ):
         if key in event_payload:
             done_data[key] = event_payload[key]
     return done_data
+
+
+def normalize_substep_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a stable public shape for all substep events."""
+    step = str(payload.get("step") or "unknown")
+    status = str(payload.get("status") or "done")
+    if status not in {"started", "done", "failed"}:
+        status = "done"
+    normalized = {
+        "step": step,
+        "label": payload.get("label") or _label_for_step(step),
+        "status": status,
+        "duration_ms": int(payload.get("duration_ms", payload.get("elapsed_ms", 0)) or 0),
+        "input_count": int(payload.get("input_count", 0) or 0),
+        "output_count": int(payload.get("output_count", 0) or 0),
+        "message": payload.get("message") or payload.get("detail") or "",
+    }
+    for key, value in payload.items():
+        if key not in normalized and key not in {"elapsed_ms", "detail"}:
+            normalized[key] = value
+    return normalized
+
+
+def _label_for_step(step: str) -> str:
+    labels = {
+        "classify": "问题分类",
+        "rewrite": "问题改写",
+        "bm25_retrieve": "关键词检索",
+        "vector_retrieve": "向量检索",
+        "rrf_merge": "RRF 融合",
+        "rerank": "精排",
+        "context_expand": "上下文扩展",
+        "citation_verify": "引用核验",
+        "generate": "生成回答",
+    }
+    return labels.get(step, step)
 
 
 async def sse_event_stream(

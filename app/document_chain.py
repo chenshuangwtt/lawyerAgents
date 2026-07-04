@@ -85,7 +85,7 @@ async def ask_document_stream(
         yield {"type": "substep", "step": "decompose", "elapsed_ms": extract_ms,
                "detail": "字段提取完成"}
 
-        if result.get("status") == "missing_fields":
+        if result.get("status") in {"need_more_info", "missing_fields"}:
             set_pending_document(session_id, {
                 "doc_type": LABOR_DOC_TYPE,
                 "case_state": case_state or {},
@@ -102,15 +102,18 @@ async def ask_document_stream(
                 "risk_warning": RISK_WARNING,
                 "domain": "劳动",
                 "doc_type": LABOR_DOC_TYPE,
-                "status": "missing_fields",
+                "status": "need_more_info",
+                "legacy_status": result.get("legacy_status", "missing_fields"),
                 "missing_fields": result.get("missing_fields", []),
+                "missing_field_names": result.get("missing_field_names", []),
+                "clarification_questions": result.get("clarification_questions", []),
                 "extracted_fields": fields,
                 "document_result": result,
             }
             return
 
         _t = time.perf_counter()
-        document = result.get("document_markdown", "")
+        document = result.get("draft_markdown") or result.get("document_markdown", "")
         gen_ms = round((time.perf_counter() - _t) * 1000)
         yield {"type": "substep", "step": "generate", "elapsed_ms": gen_ms,
                "detail": "劳动人事争议仲裁申请书生成完成"}
@@ -129,8 +132,10 @@ async def ask_document_stream(
             "risk_warning": RISK_WARNING,
             "domain": "劳动",
             "doc_type": LABOR_DOC_TYPE,
-            "status": "success",
+            "status": "ready",
+            "legacy_status": result.get("legacy_status", "success"),
             "missing_fields": [],
+            "missing_field_names": [],
             "extracted_fields": fields,
             "document_result": result,
         }
@@ -173,7 +178,7 @@ def _format_case_state_for_labor(case_state: Dict) -> str:
     raw_input = case_state.get("raw_input")
     if raw_input:
         parts.append(f"原始案情：{raw_input}")
-    analysis_result = case_state.get("analysis_result")
+    analysis_result = case_state.get("analysis_markdown") or case_state.get("analysis_result")
     if analysis_result:
         parts.append(f"案情分析结果：\n{analysis_result}")
     key_facts = case_state.get("key_facts") or []

@@ -20,6 +20,7 @@ from langchain_core.documents import Document
 
 from app.core import PARA_PATTERN, invoke_with_timeout
 from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
+from app.source_item import SourceItem, normalize_sources
 
 
 # 置信度阈值（向量余弦相似度）
@@ -28,6 +29,16 @@ MEDIUM_THRESHOLD = 0.30
 
 # 遗漏检测阈值
 MISSING_THRESHOLD = 0.30
+
+_CITATION_ARTICLE_PATTERN = r"第([零一二三四五六七八九十百千万0-9]+)条"
+_BRACKET_CITATION_RE = re.compile(
+    rf"《([^》]+)》\s*({_CITATION_ARTICLE_PATTERN})"
+)
+_GENERIC_LAW_CITATION_RE = re.compile(
+    rf"(?:根据|依据|依照|按照|适用)?\s*"
+    rf"([\u4e00-\u9fff]{{2,40}}?(?:法|典|条例|规定|解释))\s*"
+    rf"({_CITATION_ARTICLE_PATTERN})"
+)
 
 
 def _cosine_similarity(vec_a, vec_b) -> float:
@@ -40,20 +51,156 @@ def _cosine_similarity(vec_a, vec_b) -> float:
     return float(np.dot(a, b) / norm)
 
 
+def extract_answer_citations(answer: str, sources: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """Extract explicit law-name + article-number citations from answer text."""
+    text = answer or ""
+    known_laws = _known_law_names(sources or [])
+    seen: set[tuple[str, int]] = set()
+    citations: List[Dict[str, Any]] = []
+
+    def add(law_name: str, article_no: str) -> None:
+        law_name = _clean_law_name(law_name)
+        article_no = _normalize_article_label(article_no)
+        article_num = _article_number(article_no)
+        if not law_name or article_num <= 0:
+            return
+        key = (_law_key(law_name), article_num)
+        if key in seen:
+            return
+        seen.add(key)
+        citations.append({
+            "citation": f"{law_name}{article_no}",
+            "law_name": law_name,
+            "article_no": article_no,
+            "article_num": article_num,
+        })
+
+    for law_name, article_no, _num in _BRACKET_CITATION_RE.findall(text):
+        add(law_name, article_no)
+
+    for law_name, article_no, _num in _GENERIC_LAW_CITATION_RE.findall(text):
+        clean_law = _clean_law_name(law_name)
+        if _looks_like_known_law(clean_law, known_laws) or _looks_like_legal_source(clean_law):
+            add(clean_law, article_no)
+
+    return citations
+
+
+def _known_law_names(sources: List[Dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for source in sources:
+        for value in (source.get("law_name"), source.get("source"), source.get("title")):
+            if not value:
+                continue
+            law_name = _clean_law_name(str(value).split()[0])
+            if law_name:
+                names.add(_law_key(law_name))
+    return names
+
+
+def _clean_law_name(law_name: str) -> str:
+    law_name = re.sub(r"\s+", "", str(law_name or ""))
+    law_name = law_name.strip("《》：:，,。；;（）()")
+    law_name = re.sub(r"^(根据|依据|依照|按照|适用)", "", law_name)
+    return law_name
+
+
+def _law_key(law_name: str) -> str:
+    return _clean_law_name(law_name).replace("中华人民共和国", "")
+
+
+def _normalize_article_label(article_no: str) -> str:
+    article_no = re.sub(r"\s+", "", str(article_no or ""))
+    match = ARTICLE_PATTERN.search(article_no)
+    return match.group(0) if match else article_no
+
+
+def _article_number(article_no: str) -> int:
+    match = ARTICLE_PATTERN.search(str(article_no or ""))
+    if not match:
+        return 0
+    return chinese_num_to_int(match.group(1))
+
+
+def _looks_like_known_law(law_name: str, known_laws: set[str]) -> bool:
+    key = _law_key(law_name)
+    return bool(key and (key in known_laws or f"中华人民共和国{key}" in known_laws))
+
+
+def _looks_like_legal_source(law_name: str) -> bool:
+    if len(law_name) < 2:
+        return False
+    return law_name.endswith(("法", "典", "条例", "规定", "解释"))
+
+
 class CitationVerifier:
     """引用验证器：向量语义 + LLM 准确性。"""
 
-    def __init__(self, article_index: Dict, embeddings=None, llm=None):
+    def __init__(self, article_index: Optional[Dict] = None, embeddings=None, llm=None):
         """
         Args:
             article_index: 条号索引 {law_name: {article_num: [chunks]}}。
             embeddings: LangChain Embeddings 实例（用于向量相似度）。
             llm: LLM 实例（用于描述准确性验证）。
         """
-        self.article_index = article_index
+        self.article_index = article_index or {}
         self.embeddings = embeddings
         self.llm = llm
         self._embed_cache: Dict[str, list] = {}
+
+    def verify(self, answer: str, sources: List[SourceItem | Dict[str, Any] | str]) -> Dict[str, Any]:
+        """Verify answer citations against returned SourceItem entries.
+
+        This lightweight checker only verifies whether an explicit law-name +
+        article-number citation in the answer is backed by the returned sources.
+        It is intentionally regex-based so the result is explainable and fast.
+        """
+        source_items = normalize_sources(sources)
+        answer_citations = extract_answer_citations(answer, source_items)
+        source_keys = {
+            (_law_key(item.get("law_name", "")), _article_number(item.get("article_no", "")))
+            for item in source_items
+            if item.get("law_name") and item.get("article_no")
+        }
+        matched_citations: List[Dict[str, Any]] = []
+        unsupported_citations: List[str] = []
+
+        for citation in answer_citations:
+            key = (_law_key(citation["law_name"]), citation["article_num"])
+            matched_source = None
+            if key[0] and key[1] > 0 and key in source_keys:
+                matched_source = next(
+                    (
+                        item
+                        for item in source_items
+                        if (_law_key(item.get("law_name", "")), _article_number(item.get("article_no", ""))) == key
+                    ),
+                    None,
+                )
+            if matched_source:
+                matched_citations.append({
+                    "citation": citation["citation"],
+                    "law_name": citation["law_name"],
+                    "article_no": citation["article_no"],
+                    "source_id": matched_source.get("source_id", ""),
+                    "source_type": matched_source.get("source_type", "unknown"),
+                    "title": matched_source.get("title", ""),
+                })
+            else:
+                unsupported_citations.append(citation["citation"])
+
+        warnings_list: List[str] = []
+        if answer_citations and not source_items:
+            warnings_list.append("回答包含引用，但 sources 为空，无法核验。")
+        if unsupported_citations:
+            warnings_list.append("部分引用未能在检索来源中核验。")
+
+        return {
+            "verified": not unsupported_citations,
+            "unsupported_citations": unsupported_citations,
+            "matched_citations": matched_citations,
+            "warnings": warnings_list,
+        }
 
     def _get_embedding(self, text: str) -> Optional[list]:
         """获取文本向量（带缓存）。"""

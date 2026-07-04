@@ -35,7 +35,9 @@ def test_semantic_cache_exact_hit(tmp_path: Path):
         assert hit is not None
         assert hit["cached"] is True
         assert hit["answer"] == "试用期长度需要结合法律和合同期限判断。"
-        assert hit["sources"] == [{"source": "劳动合同法"}]
+        assert hit["sources"][0]["source"] == "劳动合同法"
+        assert hit["sources"][0]["law_name"] == "劳动合同法"
+        assert hit["sources"][0]["source_type"] == "statute"
         assert hit["domain"] == "劳动"
     finally:
         cache.close()

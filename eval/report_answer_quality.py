@@ -88,8 +88,10 @@ def collect_known_laws(rows: list[dict[str, Any]]) -> dict[str, set[str]]:
             if doc.get("source"):
                 names.add(str(doc["source"]))
         for source in row.get("sources", []) or []:
-            if isinstance(source, dict) and source.get("source"):
-                names.add(str(source["source"]).split()[0])
+            if isinstance(source, dict):
+                label = source.get("law_name") or source.get("source")
+                if label:
+                    names.add(str(label).split()[0])
 
     aliases: dict[str, set[str]] = {}
     for name in names:
@@ -122,7 +124,10 @@ def returned_source_text(row: dict[str, Any]) -> str:
     parts: list[str] = []
     for source in row.get("sources", []) or []:
         if isinstance(source, dict):
-            parts.extend(str(source.get(key, "")) for key in ("source", "content", "full_content"))
+            parts.extend(
+                str(source.get(key, ""))
+                for key in ("source", "law_name", "article_no", "title", "content", "full_content", "text")
+            )
         else:
             parts.append(str(source))
     return "\n".join(parts)

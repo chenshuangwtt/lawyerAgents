@@ -23,6 +23,7 @@ from app.storage_paths import (
     LEGACY_CHAT_HISTORY_DB_PATH,
     get_app_db_path,
 )
+from app.source_item import normalize_sources
 
 
 # --- 后端检测 ---
@@ -117,7 +118,7 @@ def _row_to_dict(row, is_pg: bool = False) -> Dict[str, Any]:
             "session_id": row["session_id"],
             "question": row["question"],
             "answer": row["answer"],
-            "sources": json.loads(row["sources"]) if isinstance(row["sources"], str) else row["sources"],
+            "sources": normalize_sources(json.loads(row["sources"]) if isinstance(row["sources"], str) else row["sources"]),
             "domain": row.get("domain", ""),
             "case_state": row.get("case_state"),
             "created_at": row["created_at"],
@@ -127,7 +128,7 @@ def _row_to_dict(row, is_pg: bool = False) -> Dict[str, Any]:
         "session_id": row["session_id"],
         "question": row["question"],
         "answer": row["answer"],
-        "sources": json.loads(row["sources"]),
+        "sources": normalize_sources(json.loads(row["sources"])),
         "domain": row["domain"] if "domain" in row.keys() else "",
         "case_state": row["case_state"] if "case_state" in row.keys() else None,
         "created_at": row["created_at"],
@@ -136,10 +137,10 @@ def _row_to_dict(row, is_pg: bool = False) -> Dict[str, Any]:
 
 # --- CRUD 操作 ---
 
-def save_record(session_id: str, question: str, answer: str, sources: List[Dict[str, str]], domain: str = "", case_state: Optional[str] = None) -> int:
+def save_record(session_id: str, question: str, answer: str, sources: List[Dict[str, Any]], domain: str = "", case_state: Optional[str] = None) -> int:
     """保存一条问答记录。"""
     now = datetime.now().isoformat()
-    sources_json = json.dumps(sources, ensure_ascii=False)
+    sources_json = json.dumps(normalize_sources(sources), ensure_ascii=False)
 
     with _lock:
         if USE_PG:

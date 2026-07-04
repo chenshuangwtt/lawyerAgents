@@ -5,6 +5,16 @@ from langchain_core.documents import Document
 from app.rag_citations import format_case_context, repair_cached_sources, verify_citations, verify_sources
 
 
+def _summary(sources):
+    return [(s["law_name"], s["article_no"], s["source_type"]) for s in sources]
+
+
+def _assert_legacy_fields(source):
+    assert "source" in source
+    assert "content" in source
+    assert "full_content" in source
+
+
 def test_verify_citations_removes_fabricated_article_numbers():
     sources = [{
         "source": "中华人民共和国民法典 第四条、第九百九十九条",
@@ -34,11 +44,9 @@ def test_verify_sources_formats_and_checks_answer_citations():
 
     sources = verify_sources(answer, docs, article_index, components={})
 
-    assert sources == [{
-        "source": "中华人民共和国民法典 第四条",
-        "content": "",
-        "full_content": "",
-    }]
+    assert _summary(sources) == [("中华人民共和国民法典", "第四条", "statute")]
+    assert sources[0]["text"] == docs[0].page_content
+    _assert_legacy_fields(sources[0])
 
 
 def test_verify_sources_respects_law_name_when_same_article_number_exists():
@@ -64,11 +72,10 @@ def test_verify_sources_respects_law_name_when_same_article_number_exists():
 
     sources = verify_sources(answer, [unrelated_doc, theft_doc], article_index, components={})
 
-    assert sources == [{
-        "source": "中华人民共和国刑法 第二百六十四条、第六十七条",
-        "content": "",
-        "full_content": "",
-    }]
+    assert _summary(sources) == [
+        ("中华人民共和国刑法", "第二百六十四条", "statute"),
+        ("中华人民共和国刑法", "第六十七条", "statute"),
+    ]
 
 
 def test_verify_sources_uses_generation_docs_with_primary_and_interpretation():
@@ -106,17 +113,9 @@ def test_verify_sources_uses_generation_docs_with_primary_and_interpretation():
         components={},
     )
 
-    assert sources == [
-        {
-            "source": "中华人民共和国刑法 第二百六十四条",
-            "content": "",
-            "full_content": "",
-        },
-        {
-            "source": "最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释 第一条",
-            "content": "",
-            "full_content": "",
-        },
+    assert _summary(sources) == [
+        ("中华人民共和国刑法", "第二百六十四条", "statute"),
+        ("最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释", "第一条", "interpretation"),
     ]
 
 
@@ -145,11 +144,9 @@ def test_verify_sources_does_not_attach_referenced_criminal_law_article_to_inter
 
     sources = verify_sources(answer, [interpretation_doc], article_index, components={})
 
-    assert sources == [{
-        "source": "最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释 第一条",
-        "content": "",
-        "full_content": "",
-    }]
+    assert _summary(sources) == [
+        ("最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释", "第一条", "interpretation")
+    ]
 
 
 def test_verify_sources_adds_answer_cited_law_when_article_index_can_verify_it():
@@ -178,17 +175,9 @@ def test_verify_sources_adds_answer_cited_law_when_article_index_can_verify_it()
 
     sources = verify_sources(answer, [interpretation_doc], article_index, components={})
 
-    assert sources == [
-        {
-            "source": "最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释 第一条",
-            "content": "",
-            "full_content": "",
-        },
-        {
-            "source": "中华人民共和国刑法 第二百六十四条",
-            "content": "",
-            "full_content": "",
-        },
+    assert _summary(sources) == [
+        ("最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释", "第一条", "interpretation"),
+        ("中华人民共和国刑法", "第二百六十四条", "statute"),
     ]
 
 
@@ -215,17 +204,9 @@ def test_verify_sources_adds_short_law_name_with_arabic_article_number():
 
     sources = verify_sources(answer, [interpretation_doc], article_index, components={})
 
-    assert sources == [
-        {
-            "source": "最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释 第1条",
-            "content": "",
-            "full_content": "",
-        },
-        {
-            "source": "中华人民共和国刑法 第264条",
-            "content": "",
-            "full_content": "",
-        },
+    assert _summary(sources) == [
+        ("最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释", "第1条", "interpretation"),
+        ("中华人民共和国刑法", "第264条", "statute"),
     ]
 
 
@@ -252,17 +233,9 @@ def test_verify_sources_adds_bare_criminal_law_article_without_book_title():
 
     sources = verify_sources(answer, [interpretation_doc], article_index, components={})
 
-    assert sources == [
-        {
-            "source": "最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释 第一条",
-            "content": "",
-            "full_content": "",
-        },
-        {
-            "source": "中华人民共和国刑法 第二百六十四条",
-            "content": "",
-            "full_content": "",
-        },
+    assert _summary(sources) == [
+        ("最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释", "第一条", "interpretation"),
+        ("中华人民共和国刑法", "第二百六十四条", "statute"),
     ]
 
 
@@ -286,17 +259,9 @@ def test_repair_cached_sources_adds_missing_cited_law():
 
     sources = repair_cached_sources(cached_sources, answer, article_index)
 
-    assert sources == [
-        {
-            "source": "最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释 第一条",
-            "content": "",
-            "full_content": "",
-        },
-        {
-            "source": "中华人民共和国刑法 第264条",
-            "content": "",
-            "full_content": "",
-        },
+    assert _summary(sources) == [
+        ("最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释", "第一条", "interpretation"),
+        ("中华人民共和国刑法", "第264条", "statute"),
     ]
 
 
@@ -323,18 +288,11 @@ def test_repair_cached_sources_falls_back_to_components_chunks():
         components={"chunks": [criminal_law_doc]},
     )
 
-    assert sources == [
-        {
-            "source": "最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释 第1条",
-            "content": "",
-            "full_content": "",
-        },
-        {
-            "source": "中华人民共和国刑法 第二百六十四条",
-            "content": "",
-            "full_content": "",
-        },
+    assert _summary(sources) == [
+        ("最高人民法院、最高人民检察院关于办理盗窃刑事案件适用法律若干问题的解释", "第1条", "interpretation"),
+        ("中华人民共和国刑法", "第二百六十四条", "statute"),
     ]
+    assert sources[1]["text"] == criminal_law_doc.page_content
 
 
 def test_format_case_context_only_includes_official_cases():

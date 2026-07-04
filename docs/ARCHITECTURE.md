@@ -12,7 +12,7 @@ lawyerAgents 是一个面向中国法律场景的 RAG 智能咨询系统。系�
 
 ```mermaid
 flowchart LR
-    U["用户"] --> FE["Vue3 前端<br/>Chat UI / Markdown / Sources"]
+    U["用户"] --> FE["Vue3 前端<br/>Chat UI / Markdown / RAG Progress / Source Cards"]
     FE --> API["FastAPI API 层<br/>鉴权 / 限流 / SSE / 路由"]
 
     API --> RAG["RAG Pipeline<br/>分类 / 改写 / 检索 / 精排 / 生成"]
@@ -33,7 +33,9 @@ flowchart LR
 
 ### Vue3 前端
 
-负责聊天界面、模式选择、SSE 流式展示、Markdown 渲染、引用法条卡片、参考案例展示、反馈入口以及劳动仲裁申请书预览等交互。
+负责聊天界面、模式选择、SSE 流式展示、Markdown 渲染、RAG 过程面板、来源卡片、风险提示、参考案例展示、反馈入口以及劳动仲裁申请书预览等交互。
+
+前端会解析 `meta / substep / token / done / error` 事件。`substep` 用于展示问题分类、Query Rewrite、BM25 检索、向量检索、RRF 融合、Rerank 精排、上下文扩展、引用校验和生成回答等阶段的状态和耗时。`done` 后展示 `sources` 来源卡片和 `risk_warning` 风险提示。
 
 ### FastAPI API 层
 
@@ -96,10 +98,10 @@ BM25 适合精确术语、罪名、法条编号和时效关键词；向量检索
 其中：
 
 - `meta`：领域、缓存命中、多域标记等元信息。
-- `substep`：分类、检索、精排、扩展、生成等阶段进度。
+- `substep`：分类、改写、BM25、向量检索、RRF、精排、上下文扩展、引用校验、生成等阶段进度；字段包括 `step`、`label`、`status`、`duration_ms`、`input_count`、`output_count`、`message`。
 - `token`：模型生成内容。
 - `done`：最终 sources、risk_warning、timings、record_id。
-- `error`：错误信息。
+- `error`：失败 step 和可读错误信息。
 
 ## 4. 数据流
 
@@ -117,7 +119,7 @@ BM25 和向量检索结果经 RRF 融合和 Rerank 精排后，系统补充相�
 
 ### 回答、引用、反馈持久化
 
-回答生成后，系统返回 Markdown `answer`、`sources`、`risk_warning`、`case_results` 等结构化结果。会话记录、用户反馈和语义缓存写入 SQLite 或 PostgreSQL，便于后续追踪和优化。
+回答生成后，系统返回 Markdown `answer`、`sources`、`risk_warning`、`case_results` 等结构化结果。`sources` 优先使用统一 `SourceItem` 结构，包含 `law_name`、`article_no`、`text`、`source_type`、`confidence` 等字段，前端据此渲染来源卡片。会话记录、用户反馈和语义缓存写入 SQLite 或 PostgreSQL，便于后续追踪和优化。
 
 ## 5. 后续 Java 网关层规划
 

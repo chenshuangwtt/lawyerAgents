@@ -159,7 +159,7 @@ def source_text(result: dict[str, Any]) -> str:
         if isinstance(source, dict):
             parts.extend(
                 str(source.get(key, ""))
-                for key in ("source", "content", "full_content", "confidence")
+                for key in ("source", "law_name", "article_no", "title", "content", "full_content", "text", "confidence")
                 if source.get(key)
             )
         else:

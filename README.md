@@ -28,7 +28,7 @@
 
 FastAPI + Vue3 前后端分离。
 
-支持 SSE 流式输出，前端可展示生成过程和来源卡片。
+支持 SSE 流式输出，前端可展示 RAG 过程、阶段状态、耗时、风险提示和来源卡片。
 
 支持多轮会话记忆、语义缓存、用户反馈和回答修正。
 
@@ -84,15 +84,29 @@ http://localhost:9000
 
 ```powershell
 cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 前端默认地址通常为：
 
 ```text
-http://localhost:5173
+http://localhost:3000
 ```
+
+如果 3000 端口已被占用，Vite 会自动切换到 3001、3002 等后续端口。
+
+### 前端 RAG 展示
+
+聊天页会解析后端 SSE 事件：
+
+- `meta`：领域、意图、多域信息。
+- `substep`：RAG 阶段进度，包括问题分类、Query Rewrite、BM25 检索、向量检索、RRF 融合、Rerank 精排、上下文扩展、引用校验和生成回答。
+- `token`：Markdown 回答正文流式输出。
+- `done`：最终 `sources`、`risk_warning`、`timings`、`record_id` 等。
+- `error`：失败步骤和可读错误信息。
+
+回答完成后，前端会展示来源卡片。来源卡片兼容旧字符串来源和新的 `SourceItem` 结构，优先展示法律名称、条号、片段、`source_type` 和 `confidence`。
 
 ## 配置
 

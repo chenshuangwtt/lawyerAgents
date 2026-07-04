@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
 from app.core import PARA_PATTERN, _format_sources
+from app.source_item import normalize_sources
 
 
 def verify_sources(
@@ -46,7 +47,7 @@ def repair_cached_sources(
         repaired,
         article_index or {},
         answer=answer_text,
-        reranked_docs=[],
+        reranked_docs=(components or {}).get("chunks", []),
         enable_semantic=(components or {}).get("enable_semantic_verification", False),
     )
 
@@ -295,7 +296,7 @@ def verify_citations_semantic(
     sources = verify_citations(sources, article_index)
 
     if not enable_semantic or not answer:
-        return sources
+        return normalize_sources(sources, docs=reranked_docs or [], article_index=article_index)
 
     from app.citation_verifier import CitationVerifier
     verifier = CitationVerifier(article_index)
@@ -312,4 +313,4 @@ def verify_citations_semantic(
                 "confidence": "suggested",
             })
 
-    return sources
+    return normalize_sources(sources, docs=reranked_docs or [], article_index=article_index)

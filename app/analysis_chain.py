@@ -153,6 +153,7 @@ async def ask_analysis_stream(
                      type(report_result).__name__,
                      list(report_result.keys()) if isinstance(report_result, dict) else "N/A")
         report = report_result.get("report", "")
+        structured_result = report_result.get("analysis_result", {})
         sources = report_result.get("sources", [])
         case_results = report_result.get("case_results", [])
         logger.info("[analysis_stream] 报告生成完成: %d 字", len(report))
@@ -173,6 +174,7 @@ async def ask_analysis_stream(
             "domains": domain_history,
             "raw_input": question,
             "analysis_result": report,
+            "analysis_structured": structured_result,
             "claims": claims,
         })
         case_type = "劳动争议" if is_labor_case else (primary_domain or "综合")
@@ -181,6 +183,7 @@ async def ask_analysis_stream(
             session_id=session_id,
             raw_input=question,
             analysis_result=report,
+            analysis_structured=structured_result,
             case_type=case_type,
             domains=domains,
             primary_domain=primary_domain,
@@ -196,7 +199,8 @@ async def ask_analysis_stream(
                          "verdict": ""} for c in claims],
             "case_analysis_id": analysis_record["case_analysis_id"],
             "raw_input": question,
-            "analysis_result": report,
+            "analysis_result": structured_result,
+            "analysis_markdown": report,
             "case_type": analysis_record["case_type"],
             "domains": analysis_record["domains"],
             "primary_domain": analysis_record["primary_domain"],
@@ -238,6 +242,8 @@ async def ask_analysis_stream(
             "multi_domain": len(domain_history) > 1,
             "case_results": case_results,
             "case_state": new_case_state,
+            "analysis_result": structured_result,
+            "analysis_markdown": report,
             "case_analysis_id": analysis_record["case_analysis_id"],
             "timings": {"generate": gen_ms},
         }

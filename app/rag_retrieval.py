@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, List, Tuple
 
 from langchain_core.documents import Document
@@ -270,7 +271,9 @@ def hybrid_retrieve(
     source_coverage_max_sources = components.get("source_coverage_max_sources", 3)
     source_coverage_per_source = components.get("source_coverage_per_source", 1)
     article_index = components.get("article_index", {})
+    timings: Dict[str, int] = {}
 
+    _t_vector = time.perf_counter()
     if law_names and hasattr(retriever, "vectorstore"):
         filtered_retriever = retriever.vectorstore.as_retriever(
             search_kwargs={"k": vector_top_k, "filter": {"source": {"$in": law_names}}}
@@ -284,7 +287,9 @@ def hybrid_retrieve(
                 seen_contents.add(doc.page_content[:200])
     else:
         vector_docs = retriever.invoke(query)
+    timings["vector_retrieve"] = round((time.perf_counter() - _t_vector) * 1000)
 
+    _t_bm25 = time.perf_counter()
     bm25_results = []
     if bm25_retriever:
         bm25_results = bm25_retriever.retrieve(
@@ -334,8 +339,10 @@ def hybrid_retrieve(
         if injected:
             bm25_results = injected + bm25_results
             logger.info("[条文直取] 注入 %s 条显式法条候选", len(injected))
+    timings["bm25_retrieve"] = round((time.perf_counter() - _t_bm25) * 1000)
 
     rrf_trace = []
+    _t_rrf = time.perf_counter()
     if include_trace:
         merged_docs, rrf_trace = reciprocal_rank_fusion_with_trace(
             bm25_results,
@@ -356,6 +363,7 @@ def hybrid_retrieve(
             source_coverage_max_sources=source_coverage_max_sources,
             source_coverage_per_source=source_coverage_per_source,
         )
+    timings["rrf_merge"] = round((time.perf_counter() - _t_rrf) * 1000)
     logger.info(
         "[混合检索] BM25=%s + 向量=%s → RRF融合=%s",
         len(bm25_results),
@@ -369,6 +377,7 @@ def hybrid_retrieve(
         "bm25_count": len(bm25_results),
         "vector_count": len(vector_docs),
         "merged_count": len(merged_docs),
+        "timings": timings,
     }
     if include_trace:
         stats["bm25_results"] = [

@@ -256,7 +256,10 @@ def test_hybrid_retrieve_adds_filtered_and_fallback_results():
         "劳动合同法关键词命中",
         "民法典兜底关键词命中",
     }
-    assert stats == {"bm25_count": 2, "vector_count": 2, "merged_count": 4}
+    assert stats["bm25_count"] == 2
+    assert stats["vector_count"] == 2
+    assert stats["merged_count"] == 4
+    assert set(stats["timings"]) >= {"bm25_retrieve", "vector_retrieve", "rrf_merge"}
 
 
 def test_hybrid_retrieve_can_include_trace_without_changing_default_shape():

@@ -31,6 +31,7 @@ from app.storage_paths import (
     LEGACY_SEMANTIC_CACHE_DB_PATH,
     get_app_db_path,
 )
+from app.source_item import normalize_sources
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +321,7 @@ class SemanticCache:
                 (question_hash, question, embedding, answer, sources, domain, case_results, hit_count, created_at, last_hit_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             """, (q_hash, question.strip(), _pack_embedding(vec), answer,
-                  json.dumps(sources, ensure_ascii=False), domain,
+                  json.dumps(normalize_sources(sources), ensure_ascii=False), domain,
                   json.dumps(case_results or [], ensure_ascii=False), now, now))
             self._conn.commit()
             self._embedding_cache = None  # 失效缓存
@@ -336,7 +337,7 @@ class SemanticCache:
     def _row_to_result(row) -> Dict:
         return {
             "answer": row["answer"],
-            "sources": json.loads(row["sources"]),
+            "sources": normalize_sources(json.loads(row["sources"])),
             "domain": row["domain"],
             "case_results": json.loads(row["case_results"]),
             "cached": True,

@@ -21,7 +21,7 @@ export function sendMessage(question, sessionId = 'default') {
  * @param {object} callbacks - { onMeta, onToken, onDone, onError, onSubstep }
  * @returns {boolean} 是否有内容输出
  */
-async function parseSSEStream(reader, { onMeta, onToken, onDone, onError, onSubstep, onSourcesReady }) {
+async function parseSSEStream(reader, { onMeta, onToken, onDone, onError, onSubstep, onSourcesPreview, onSourcesReady }) {
   const decoder = new TextDecoder()
   let buffer = ''
   let hasContent = false
@@ -44,8 +44,9 @@ async function parseSSEStream(reader, { onMeta, onToken, onDone, onError, onSubs
         else if (eventType === 'token') { onToken?.(data); hasContent = true }
         else if (eventType === 'done') onDone?.(data)
         else if (eventType === 'substep') onSubstep?.(data)
+        else if (eventType === 'sources_preview') onSourcesPreview?.(data)
         else if (eventType === 'sources_ready') onSourcesReady?.(data)
-        else if (eventType === 'error') onError?.(data.message)
+        else if (eventType === 'error') onError?.(data.message, data)
         eventType = null
       }
     }

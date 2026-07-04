@@ -26,6 +26,7 @@ from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
 from app.classifier import classify_question
 from app.hybrid_retriever import ChineseBM25Retriever
 from app.reranker import CrossEncoderReranker
+from app.citation_verifier import CitationVerifier
 from app.core import (
     RISK_WARNING,
     invoke_with_timeout, _get_session_history, CompressedChatMessageHistory,
@@ -54,6 +55,47 @@ from app.rag_retrieval import (
 from app.rag_query_expansion import build_retrieval_query
 
 logger = logging.getLogger(__name__)
+
+_UNVERIFIED_CITATION_WARNING = "部分引用未能在检索来源中核验"
+_SUBSTEP_LABELS = {
+    "classify": "问题分类",
+    "rewrite": "问题改写",
+    "bm25_retrieve": "关键词检索",
+    "vector_retrieve": "向量检索",
+    "rrf_merge": "RRF 融合",
+    "rerank": "精排",
+    "context_expand": "上下文扩展",
+    "citation_verify": "引用核验",
+    "generate": "生成回答",
+}
+
+
+def _substep_event(
+    step: str,
+    *,
+    status: str = "done",
+    duration_ms: int | float = 0,
+    input_count: int = 0,
+    output_count: int = 0,
+    message: str = "",
+    **extra,
+) -> dict:
+    event = {
+        "type": "substep",
+        "step": step,
+        "label": _SUBSTEP_LABELS.get(step, step),
+        "status": status,
+        "duration_ms": int(duration_ms or 0),
+        "input_count": int(input_count or 0),
+        "output_count": int(output_count or 0),
+        "message": message,
+    }
+    event.update(extra)
+    return event
+
+
+def _error_event(step: str, message: str) -> dict:
+    return {"type": "error", "step": step, "message": message}
 
 
 _ANSWER_RISK_MARKERS = (
@@ -427,6 +469,7 @@ def _post_process_answer(
     """
     citation_docs = retrieval_trace.get("generation_docs", [])
     sources = _verify_sources(answer_text, citation_docs, article_index, components)
+    citation_verification = _verify_answer_source_citations(answer_text, sources)
 
     case_results = []
     if not skip_case_search:
@@ -441,7 +484,30 @@ def _post_process_answer(
         "sources": sources,
         "case_results": case_results,
         "case_state": new_case_state,
+        "citation_verification": citation_verification,
+        "risk_warning": _risk_warning_with_citation_check(RISK_WARNING, citation_verification),
     }
+
+
+def _verify_answer_source_citations(answer_text: str, sources: list) -> dict:
+    try:
+        return CitationVerifier().verify(answer_text, sources)
+    except Exception as e:
+        logger.warning("[引用一致性] 校验失败: %s", e)
+        return {
+            "verified": True,
+            "unsupported_citations": [],
+            "matched_citations": [],
+            "warnings": [f"引用一致性校验失败：{e}"],
+        }
+
+
+def _risk_warning_with_citation_check(base_warning: str, citation_verification: dict) -> str:
+    if not citation_verification.get("unsupported_citations"):
+        return base_warning
+    if _UNVERIFIED_CITATION_WARNING in base_warning:
+        return base_warning
+    return f"{base_warning} {_UNVERIFIED_CITATION_WARNING}。"
 
 
 def _is_simple_query(question: str) -> bool:
@@ -622,7 +688,8 @@ def _retrieve_context(
     contextualize_llm = components.get("lightweight_llm") or llm
     _case_state = _get_case_state(session_id)
     contextualized_q = _contextualize_query(contextualize_llm, history_obj.messages, question, case_state=_case_state)
-    timings["contextualize"] = round((time.perf_counter() - _t) * 1000)
+    timings["rewrite"] = round((time.perf_counter() - _t) * 1000)
+    timings["contextualize"] = timings["rewrite"]
     retrieval_query = build_retrieval_query(contextualized_q, domain, law_names)
     if retrieval_query != contextualized_q:
         logger.info("[检索扩展] 已添加跨法律检索提示，chars=%d", len(retrieval_query))
@@ -631,6 +698,7 @@ def _retrieve_context(
     _t = time.perf_counter()
     merged_docs, _retrieval_stats = hybrid_retrieve(retriever, retrieval_query, law_names, components)
     timings["retrieve"] = round((time.perf_counter() - _t) * 1000)
+    timings.update((_retrieval_stats or {}).get("timings", {}))
 
     # ④ Rerank 精排（简单查询跳过，直接取 top-N）
     _t = time.perf_counter()
@@ -651,7 +719,8 @@ def _retrieve_context(
         article_index,
         components,
     )
-    timings["expand"] = round((time.perf_counter() - _t) * 1000)
+    timings["context_expand"] = round((time.perf_counter() - _t) * 1000)
+    timings["expand"] = timings["context_expand"]
 
     # ⑤.5 定义聚合
     all_chunks = components.get("chunks", [])
@@ -707,6 +776,7 @@ def _retrieve_context(
         "article_index": article_index,
         "method": method,
         "timings": timings,
+        "retrieval_stats": _retrieval_stats,
     }
 
 
@@ -753,9 +823,10 @@ def ask(
         "answer": answer_text,
         "sources": post["sources"],
         "domain": ctx["domain"],
-        "risk_warning": RISK_WARNING,
+        "risk_warning": post["risk_warning"],
         "case_results": post["case_results"],
         "case_state": post["case_state"],
+        "citation_verification": post["citation_verification"],
     }
 
 
@@ -777,7 +848,7 @@ async def ask_stream(
         {"type": "substep", "step": str, "domain": str, ...}       — 进度（多域）
         {"type": "token", "content": str}                          — 逐 token 输出
         {"type": "done", "sources": [...], "risk_warning": str}    — 结束信号
-        {"type": "error", "message": str}                          — 错误
+        {"type": "error", "step": str, "message": str}              — 错误
     """
     if components is None:
         components = {}
@@ -798,15 +869,58 @@ async def ask_stream(
             ctx = _retrieve_context(retriever, llm, question, session_id, components, simple_mode=simple)
             yield {"type": "meta", "domain": ctx["domain"]}
 
-            # emit substep events
-            yield {"type": "substep", "step": "classify", "elapsed_ms": ctx["timings"].get("classify", 0),
-                   "detail": f"领域={ctx['domain']}, 方法={ctx.get('method', 'unknown')}"}
-            yield {"type": "substep", "step": "retrieve", "elapsed_ms": ctx["timings"].get("retrieve", 0),
-                   "detail": "BM25 + 向量 → RRF"}
-            yield {"type": "substep", "step": "rerank", "elapsed_ms": ctx["timings"].get("rerank", 0),
-                   "detail": "精排完成"}
-            yield {"type": "substep", "step": "expand", "elapsed_ms": ctx["timings"].get("expand", 0),
-                   "detail": "上下文扩展"}
+            retrieval_stats = ctx.get("retrieval_stats", {}) or {}
+            timings = ctx.get("timings", {}) or {}
+            yield _substep_event(
+                "classify",
+                duration_ms=timings.get("classify", 0),
+                input_count=1,
+                output_count=1,
+                message=f"领域={ctx['domain']}, 方法={ctx.get('method', 'unknown')}",
+            )
+            yield _substep_event(
+                "rewrite",
+                duration_ms=timings.get("rewrite", timings.get("contextualize", 0)),
+                input_count=1,
+                output_count=1,
+                message="完成问题改写与检索提示扩展",
+            )
+            yield _substep_event(
+                "bm25_retrieve",
+                duration_ms=timings.get("bm25_retrieve", 0),
+                input_count=1,
+                output_count=retrieval_stats.get("bm25_count", 0),
+                message="关键词检索完成",
+            )
+            yield _substep_event(
+                "vector_retrieve",
+                duration_ms=timings.get("vector_retrieve", 0),
+                input_count=1,
+                output_count=retrieval_stats.get("vector_count", 0),
+                message="向量检索完成",
+            )
+            yield _substep_event(
+                "rrf_merge",
+                duration_ms=timings.get("rrf_merge", 0),
+                input_count=retrieval_stats.get("bm25_count", 0) + retrieval_stats.get("vector_count", 0),
+                output_count=retrieval_stats.get("merged_count", 0),
+                message="融合候选完成",
+            )
+            yield _substep_event(
+                "rerank",
+                duration_ms=timings.get("rerank", 0),
+                input_count=retrieval_stats.get("merged_count", 0),
+                output_count=len(ctx.get("reranked_docs", []) or []),
+                message="精排完成",
+            )
+            generation_docs = ctx.get("retrieval_trace", {}).get("generation_docs", [])
+            yield _substep_event(
+                "context_expand",
+                duration_ms=timings.get("context_expand", timings.get("expand", 0)),
+                input_count=len(ctx.get("reranked_docs", []) or []),
+                output_count=len(generation_docs),
+                message="上下文扩展完成",
+            )
 
             config = {"configurable": {"session_id": session_id}}
             _case_state = _get_case_state(session_id)
@@ -831,6 +945,7 @@ async def ask_stream(
             stream_start = asyncio.get_event_loop().time()
             total_timeout = 180
             token_timeout = 60
+            yield _substep_event("generate", status="started", message="开始生成回答")
             try:
                 logger.info("[流式生成] 开始，context=%d chars", len(ctx["context_text"]))
                 stream_iter = chain_with_history.astream(stream_input, config=config).__aiter__()
@@ -841,7 +956,8 @@ async def ask_stream(
                         logger.warning("[流式生成] 总计 %ss 超时，中断", total_timeout)
                         if answer_parts:
                             break
-                        yield {"type": "error", "message": "回答生成超时，请简化问题后重试"}
+                        yield _substep_event("generate", status="failed", message="回答生成超时")
+                        yield _error_event("generate", "回答生成超时，请简化问题后重试")
                         return
                     try:
                         chunk = await asyncio.wait_for(
@@ -857,7 +973,8 @@ async def ask_stream(
                         )
                         if answer_parts:
                             break
-                        yield {"type": "error", "message": "回答生成超时，请简化问题后重试"}
+                        yield _substep_event("generate", status="failed", message="回答生成超时")
+                        yield _error_event("generate", "回答生成超时，请简化问题后重试")
                         return
                     content = chunk.content if hasattr(chunk, "content") else str(chunk)
                     if content:
@@ -866,19 +983,39 @@ async def ask_stream(
             except Exception as e:
                 logger.error("[流式生成] 异常: %s", e)
                 if not answer_parts:
-                    yield {"type": "error", "message": f"生成中断: {e}"}
+                    yield _substep_event("generate", status="failed", message=f"生成中断: {e}")
+                    yield _error_event("generate", f"生成中断: {e}")
                     return
             gen_ms = round((time.perf_counter() - _t_gen) * 1000)
+            yield _substep_event(
+                "generate",
+                status="done",
+                duration_ms=gen_ms,
+                input_count=len(ctx["context_text"]),
+                output_count=len(answer_parts),
+                message="回答生成完成",
+            )
 
             # token 结束后：引用校验（快，纯计算）
             answer_text = "".join(answer_parts)
             retrieval_trace = ctx.get("retrieval_trace", {})
+            _t_cite = time.perf_counter()
             sources = _verify_sources(
                 answer_text,
                 retrieval_trace.get("generation_docs", []),
                 ctx["article_index"],
                 components,
             )
+            citation_verification = _verify_answer_source_citations(answer_text, sources)
+            citation_ms = round((time.perf_counter() - _t_cite) * 1000)
+            yield _substep_event(
+                "citation_verify",
+                duration_ms=citation_ms,
+                input_count=len(sources),
+                output_count=len(citation_verification.get("matched_citations", [])),
+                message="引用核验完成" if citation_verification.get("verified") else "存在未核验引用",
+            )
+            risk_warning = _risk_warning_with_citation_check(RISK_WARNING, citation_verification)
             # 等待案例检索完成
             case_results = await case_future if case_future else []
 
@@ -886,8 +1023,9 @@ async def ask_stream(
             yield {
                 "type": "sources_ready",
                 "sources": sources,
-                "risk_warning": RISK_WARNING,
+                "risk_warning": risk_warning,
                 "case_results": case_results,
+                "citation_verification": citation_verification,
             }
 
             # 案情状态提取（LLM 调用，最后完成）
@@ -897,15 +1035,19 @@ async def ask_stream(
 
             yield {
                 "type": "done",
+                "sources": sources,
+                "risk_warning": risk_warning,
                 "domain": ctx["domain"],
                 "domains": [ctx["domain"]],
                 "multi_domain": False,
                 "case_state": new_case_state,
-                "timings": {**ctx["timings"], "generate": gen_ms},
+                "case_results": case_results,
+                "citation_verification": citation_verification,
+                "timings": {**ctx["timings"], "generate": gen_ms, "citation_verify": citation_ms},
             }
     except Exception as e:
         logger.exception("[ask_stream] 流式查询失败")
-        yield {"type": "error", "message": "查询处理失败，请稍后重试"}
+        yield _error_event("unknown", "查询处理失败，请稍后重试")
 
 
 async def _ask_stream_graph(
@@ -950,7 +1092,15 @@ async def _ask_stream_graph(
                 elif node_name == "generate_sub_questions":
                     sq = update.get("sub_questions", {})
                     for d, q in sq.items():
-                        yield {"type": "substep", "step": "sub_question", "domain": d, "question": q}
+                        yield _substep_event(
+                            "rewrite",
+                            status="started",
+                            input_count=1,
+                            output_count=0,
+                            message=f"{d}: {q}",
+                            domain=d,
+                            question=q,
+                        )
                 elif node_name == "direct_retrieve":
                     graph_result = update
                 elif node_name == "merge_contexts":
@@ -959,22 +1109,54 @@ async def _ask_stream_graph(
                 _graph_timings[node_name] = node_ms
 
                 if node_name == "classify":
-                    yield {"type": "substep", "step": "classify", "elapsed_ms": node_ms,
-                           "detail": f"领域={update.get('domain', '综合')}"}
+                    yield _substep_event(
+                        "classify",
+                        duration_ms=node_ms,
+                        input_count=1,
+                        output_count=len(update.get("domains", []) or [update.get("domain", "综合")]),
+                        message=f"领域={update.get('domain', '综合')}",
+                    )
                 elif node_name == "generate_sub_questions":
-                    yield {"type": "substep", "step": "sub_questions", "elapsed_ms": node_ms,
-                           "detail": f"拆分{len(update.get('sub_questions', {}))}个子问题"}
+                    yield _substep_event(
+                        "rewrite",
+                        duration_ms=node_ms,
+                        input_count=1,
+                        output_count=len(update.get("sub_questions", {})),
+                        message=f"拆分{len(update.get('sub_questions', {}))}个子问题",
+                    )
                 elif node_name == "retrieve_one_domain":
                     for ctx_item in update.get("retrieved_contexts", []):
-                        yield {"type": "substep", "step": "retrieve", "elapsed_ms": node_ms,
-                               "domain": ctx_item["domain"], "detail": ctx_item["domain"]}
+                        output_count = len(ctx_item.get("reranked_docs", []) or ctx_item.get("docs", []) or [])
+                        for step in ("bm25_retrieve", "vector_retrieve", "rrf_merge"):
+                            yield _substep_event(
+                                step,
+                                duration_ms=node_ms if step == "rrf_merge" else 0,
+                                input_count=1,
+                                output_count=output_count,
+                                message=ctx_item["domain"],
+                                domain=ctx_item["domain"],
+                            )
+                        yield _substep_event(
+                            "rerank",
+                            duration_ms=0,
+                            input_count=output_count,
+                            output_count=output_count,
+                            message=ctx_item["domain"],
+                            domain=ctx_item["domain"],
+                        )
                 elif node_name == "merge_contexts":
-                    yield {"type": "substep", "step": "merge", "elapsed_ms": node_ms,
-                           "detail": "合并多域结果"}
+                    merged_count = len(update.get("reranked_docs", []) or [])
+                    yield _substep_event(
+                        "context_expand",
+                        duration_ms=node_ms,
+                        input_count=merged_count,
+                        output_count=merged_count,
+                        message="合并多域结果",
+                    )
     except Exception as e:
         logger.warning("[graph] 异常: %s", e)
         if not graph_result:
-            yield {"type": "error", "message": f"检索过程出错: {e}"}
+            yield _error_event("rrf_merge", f"检索过程出错: {e}")
             return
 
     # 如果事件流中没拿到 merge/direct 结果，用 ainvoke 拿最终状态
@@ -1039,6 +1221,7 @@ async def _ask_stream_graph(
     total_timeout = 180  # 整个流式生成最多 180s
     token_timeout = 60   # 首 token / 单 token 超时 60s
     _t_gen = time.perf_counter()
+    yield _substep_event("generate", status="started", message="开始生成回答")
     try:
         stream_iter = llm.astream(messages).__aiter__()
         while True:
@@ -1048,7 +1231,8 @@ async def _ask_stream_graph(
                 logger.warning("[流式生成] 总计 %ss 超时，中断", total_timeout)
                 if answer_parts:
                     break
-                yield {"type": "error", "message": "回答生成超时，请简化问题后重试"}
+                yield _substep_event("generate", status="failed", message="回答生成超时")
+                yield _error_event("generate", "回答生成超时，请简化问题后重试")
                 return
             try:
                 chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=min(token_timeout, remaining))
@@ -1058,7 +1242,8 @@ async def _ask_stream_graph(
                 logger.warning("[流式生成] %ss 无新 token，中断（已生成 %s 个 token）", token_timeout, len(answer_parts))
                 if answer_parts:
                     break  # 已有内容，正常结束
-                yield {"type": "error", "message": "回答生成超时，请简化问题后重试"}
+                yield _substep_event("generate", status="failed", message="回答生成超时")
+                yield _error_event("generate", "回答生成超时，请简化问题后重试")
                 return
             content = chunk.content if hasattr(chunk, "content") else str(chunk)
             if content:
@@ -1067,9 +1252,18 @@ async def _ask_stream_graph(
     except Exception as e:
         logger.error("[流式生成] 异常: %s", e)
         if not answer_parts:
-            yield {"type": "error", "message": f"生成中断: {e}"}
+            yield _substep_event("generate", status="failed", message=f"生成中断: {e}")
+            yield _error_event("generate", f"生成中断: {e}")
             return
     _graph_timings["generate"] = round((time.perf_counter() - _t_gen) * 1000)
+    yield _substep_event(
+        "generate",
+        status="done",
+        duration_ms=_graph_timings["generate"],
+        input_count=len(context_text),
+        output_count=len(answer_parts),
+        message="回答生成完成",
+    )
 
     # 保存对话历史
     answer_text = "".join(answer_parts)
@@ -1080,20 +1274,32 @@ async def _ask_stream_graph(
 
     # 引用校验（快）+ 等待案例检索
     article_index = components.get("article_index", {})
+    _t_cite = time.perf_counter()
     sources = _verify_sources(
         answer_text,
         retrieval_trace.get("generation_docs", []),
         article_index,
         components,
     )
+    citation_verification = _verify_answer_source_citations(answer_text, sources)
+    _graph_timings["citation_verify"] = round((time.perf_counter() - _t_cite) * 1000)
+    yield _substep_event(
+        "citation_verify",
+        duration_ms=_graph_timings["citation_verify"],
+        input_count=len(sources),
+        output_count=len(citation_verification.get("matched_citations", [])),
+        message="引用核验完成" if citation_verification.get("verified") else "存在未核验引用",
+    )
+    risk_warning = _risk_warning_with_citation_check(RISK_WARNING, citation_verification)
     case_results = await case_future
 
     # 立即 yield sources_ready（法条 + 风险提示 + 案例）
     yield {
         "type": "sources_ready",
         "sources": sources,
-        "risk_warning": RISK_WARNING,
+        "risk_warning": risk_warning,
         "case_results": case_results,
+        "citation_verification": citation_verification,
     }
 
     # 案情状态提取（LLM 调用，最后完成）
@@ -1103,10 +1309,14 @@ async def _ask_stream_graph(
 
     yield {
         "type": "done",
+        "sources": sources,
+        "risk_warning": risk_warning,
         "domain": domain,
         "domains": domain_names,
         "multi_domain": is_multi,
+        "case_results": case_results,
         "case_state": new_case_state,
+        "citation_verification": citation_verification,
         "timings": _graph_timings,
     }
 

@@ -224,6 +224,7 @@ from app.analysis_graph import (
     REPORT_PROMPT,
     _default_analysis_section,
     ANALYSIS_SECTION_TITLES,
+    generate_report,
 )
 
 
@@ -289,6 +290,14 @@ class TestREPORTPromptRules:
     def test_path_not_only_arbitration(self):
         """不能以劳动仲裁为唯一处理路径"""
         assert "唯一处理路径" in REPORT_PROMPT
+
+    def test_contains_structured_claim_json_rules(self):
+        """报告 prompt 应要求输出请求权基础结构化 JSON"""
+        assert "possible_claims" in REPORT_PROMPT
+        assert "claim_name" in REPORT_PROMPT
+        assert "support_level" in REPORT_PROMPT
+        assert "strong / medium / weak / unknown" in REPORT_PROMPT
+        assert "证据不足" in REPORT_PROMPT
 
     def test_disclaimer_generic(self):
         """免责声明应为通用版，不写死劳动争议"""
@@ -464,3 +473,69 @@ class TestREPORTFoodSafetyRule:
         assert "食品安全法" in REPORT_PROMPT
         assert "食品生产" in REPORT_PROMPT
         assert "餐饮" in REPORT_PROMPT
+
+
+class TestStructuredCaseAnalysisResult:
+    def test_generate_report_returns_structured_analysis_result(self, monkeypatch):
+        import app.analysis_graph as analysis_graph
+
+        class Response:
+            content = (
+                "### 🧾 案情摘要\n\n员工称公司拖欠工资且未签劳动合同。\n\n"
+                "### 🏷️ 涉及法律关系\n\n- 劳动关系\n- 工资支付争议\n\n"
+                "### 🎯 争议焦点\n\n1. 是否存在拖欠工资。\n\n"
+                "### 📌 证据清单\n\n1. 工资流水\n2. 考勤记录\n\n"
+                "### ⚠️ 不利事实与风险\n\n- 欠付金额和期间仍需证明。\n\n"
+                "### 📝 下一步建议\n\n- 整理证据后申请劳动仲裁。\n\n"
+                "```json\n"
+                "{"
+                "\"case_summary\":\"员工称公司拖欠工资且未签劳动合同\","
+                "\"legal_relationships\":[\"劳动关系\",\"工资支付争议\"],"
+                "\"possible_claims\":[{"
+                "\"claim_name\":\"支付拖欠工资\","
+                "\"support_level\":\"medium\","
+                "\"reason\":\"用户描述存在欠薪事实，但需工资标准和欠付期间证据。\","
+                "\"required_evidence\":[\"工资流水\",\"考勤记录\"],"
+                "\"legal_basis\":[],"
+                "\"risk_notes\":[\"欠付金额不能仅凭口述认定。\"]"
+                "}],"
+                "\"evidence_checklist\":[\"工资流水\",\"考勤记录\"],"
+                "\"risks\":[\"证据不足时不能判断一定胜诉\"],"
+                "\"next_actions\":[\"整理证据后申请劳动仲裁\"],"
+                "\"legal_basis\":[]"
+                "}"
+                "\n```"
+            )
+
+        class FakeLLM:
+            def invoke(self, _prompt):
+                return Response()
+
+        monkeypatch.setattr(analysis_graph, "_lightweight_llm", FakeLLM())
+        monkeypatch.setattr(analysis_graph, "_llm", FakeLLM())
+        monkeypatch.setattr(analysis_graph, "_components", {})
+
+        result = generate_report({
+            "claims": [{"claim_text": "支付拖欠工资", "domain": "劳动"}],
+            "claim_contexts": [],
+            "cross_analysis": "存在劳动关系和工资支付争议。",
+            "time_nodes": [],
+            "user_input": "公司拖欠工资三个月，也没有签劳动合同。",
+            "case_summary": "员工称公司拖欠工资且未签劳动合同",
+            "legal_relationships": "劳动关系 + 工资支付争议",
+        })
+
+        structured = result["analysis_result"]
+        assert result["report"]
+        assert structured["case_summary"] == "员工称公司拖欠工资且未签劳动合同"
+        assert structured["legal_relationships"]
+        assert structured["possible_claims"]
+        claim = structured["possible_claims"][0]
+        assert claim["claim_name"] == "支付拖欠工资"
+        assert claim["support_level"] == "medium"
+        assert claim["required_evidence"]
+        assert claim["risk_notes"]
+        assert structured["evidence_checklist"]
+        assert structured["risks"]
+        assert structured["next_actions"]
+        assert "legal_basis" in structured

@@ -37,6 +37,7 @@ from app.rag_citations import repair_cached_sources
 from app.sanitizer import sanitize_input, sanitize_input_enriched
 from app.middleware import RateLimitMiddleware, APIKeyMiddleware, MetricsMiddleware, metrics
 from app.service_context import AppContext
+from app.source_item import SourceItem, normalize_sources
 from app.sse import sse_event_stream
 
 logger = logging.getLogger(__name__)
@@ -58,14 +59,6 @@ class ChatRequest(BaseModel):
         description="会话 ID，相同 ID 共享对话记忆，不同 ID 隔离上下文",
         examples=["session_001"],
     )
-
-
-class SourceItem(BaseModel):
-    """引用法条项。"""
-    content: str = Field(..., description="法条原文片段（截断预览）")
-    full_content: str = Field(default="", description="法条完整原文")
-    source: str = Field(..., description="来源法律名称")
-    confidence: str = Field(default="", description="引用置信度：high/medium/low/suggested")
 
 
 class ChatResponse(BaseModel):
@@ -379,7 +372,7 @@ async def chat(request: ChatRequest):
                 id=record_id,
                 session_id=request.session_id,
                 answer=cached["answer"],
-                sources=[SourceItem(**s) for s in cached_sources],
+                sources=[SourceItem(**s) for s in normalize_sources(cached_sources)],
                 domain=cached.get("domain", "综合"),
                 risk_warning="本回答由 AI 生成，仅供参考，不构成正式法律意见。",
                 case_results=cached_case_results,
@@ -417,7 +410,7 @@ async def chat(request: ChatRequest):
             id=record_id,
             session_id=request.session_id,
             answer=result["answer"],
-            sources=[SourceItem(**s) for s in result["sources"]],
+            sources=[SourceItem(**s) for s in normalize_sources(result["sources"])],
             domain=result.get("domain", "综合"),
             risk_warning=result.get("risk_warning", ""),
             case_results=result.get("case_results", []),
@@ -793,7 +786,7 @@ async def get_session_detail(session_id: str):
             id=r["id"],
             question=r["question"],
             answer=r["answer"],
-            sources=[SourceItem(**s) for s in r["sources"]],
+            sources=[SourceItem(**s) for s in normalize_sources(r["sources"])],
             domain=r.get("domain", "综合"),
             created_at=r["created_at"],
         )
@@ -843,7 +836,10 @@ async def export_session(session_id: str):
         if sources:
             lines.append("**引用法条**:\n")
             for s in sources:
-                lines.append(f"- {s.get('source', '')}")
+                label = s.get("title") or s.get("source") or "未知来源"
+                if s.get("source_type"):
+                    label = f"{label}（{s.get('source_type')}）"
+                lines.append(f"- {label}")
             lines.append("")
 
         lines.append("---\n")

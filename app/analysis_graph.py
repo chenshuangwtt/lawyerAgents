@@ -23,6 +23,11 @@ from app.core import (
     RISK_WARNING,
 )
 from app.rag_chain import _retrieve_context, _verify_citations_semantic
+from app.schemas.case_analysis import (
+    build_case_analysis_result,
+    extract_case_analysis_json,
+    strip_case_analysis_json,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,7 @@ class AnalysisState(TypedDict):
     cross_analysis: str                     # 交叉分析文本
     time_nodes: List[Dict]                  # 时间线节点（从交叉分析提取）
     report: str                             # 最终报告
+    analysis_result: dict
     sources: list
     case_results: list
 
@@ -147,7 +153,8 @@ REPORT_PROMPT = """你是一位资深中国法律顾问。请根据以下案情�
 交叉分析：
 {cross_analysis}
 
-请严格按以下 Markdown 三级标题输出，标题名称、emoji、顺序、数量都不能改变。不要输出 JSON：
+请严格按以下 Markdown 三级标题输出，标题名称、emoji、顺序、数量都不能改变。
+在 Markdown 十个标题之后，必须追加一个 ```json 代码块，输出结构化案情分析结果，字段见文末 JSON 规则。
 
 ### 🧾 案情摘要
 
@@ -238,6 +245,7 @@ REPORT_PROMPT = """你是一位资深中国法律顾问。请根据以下案情�
 - 引用法条时必须基于提供的法律依据，不可编造
 - 案情摘要部分要结论先行，但不要做绝对承诺
 - 如果涉及劳动争议，要重点分析劳动关系、解除行为、经济补偿、赔偿金、证据和仲裁路径
+- 如果涉及劳动争议，必须进行“请求权基础分析”：结合事实和证据，逐项评估支付拖欠工资、未签劳动合同二倍工资、违法解除赔偿金、经济补偿、加班费、社保补缴情形等可能请求；没有事实或证据支撑的请求不得写 strong，应写 unknown 或 weak。
 - 不要复用法律咨询的“初步判定、法律依据与分析、实务建议与风险提示”格式
 - 不要添加上述十个标题之外的同级标题
 - 如果检索资料中出现与案情明显无关的法律、司法解释或批复，不得在报告中引用或列为依据。
@@ -248,6 +256,37 @@ REPORT_PROMPT = """你是一位资深中国法律顾问。请根据以下案情�
 - 主要领域可包括商业秘密保护、不正当竞争、劳动合同/保密协议违约；处理路径应同时考虑劳动仲裁、侵犯商业秘密/不正当竞争民事诉讼、证据保全、行为保全，劳动仲裁不得作为唯一处理路径。
 - 涉及食品生产、食品经营、食品销售、餐饮服务、食品安全事故或食品监管处罚时，可以结合检索依据分析《食品安全法》；未出现食品安全事实时不得引用食品安全法。
 - 未出现婚姻家庭、产品缺陷、食品安全、监察、公职人员等明确事实时，不得引用对应领域法律。
+
+JSON 规则：
+- Markdown 报告之后必须追加一个 ```json 代码块。
+- JSON 只输出一个对象，不要在 JSON 外解释。
+- possible_claims 必须是数组，每一项至少包含：
+  claim_name、support_level、reason、required_evidence、legal_basis、risk_notes。
+- support_level 只能是 strong / medium / weak / unknown。
+- 证据不足、事实缺失、时效不明或主体关系未确认时，不得写 strong。
+- legal_basis 可以引用已检索到的法条名称和条号；不确定时留空数组，不得编造。
+
+JSON 示例格式：
+```json
+{{
+  "case_summary": "一句话案情摘要",
+  "legal_relationships": ["劳动关系", "工资支付争议"],
+  "possible_claims": [
+    {{
+      "claim_name": "支付拖欠工资",
+      "support_level": "unknown",
+      "reason": "需要结合工资约定、考勤和支付记录判断。",
+      "required_evidence": ["劳动合同或工资约定", "考勤记录", "工资流水"],
+      "legal_basis": [],
+      "risk_notes": ["若工资标准或欠付期间无法证明，支持程度会降低。"]
+    }}
+  ],
+  "evidence_checklist": ["劳动合同", "工资流水"],
+  "risks": ["证据不足时不能判断一定胜诉"],
+  "next_actions": ["整理证据后申请劳动仲裁"],
+  "legal_basis": []
+}}
+```
 """
 
 
@@ -590,6 +629,8 @@ def generate_report(state: AnalysisState) -> dict:
         else:
             report += "\n\n" + statute_section
 
+    structured_payload = extract_case_analysis_json(report)
+    report = strip_case_analysis_json(report)
     report = normalize_analysis_report(report, state.get("user_input", ""))
 
     # 引用校验
@@ -617,8 +658,18 @@ def generate_report(state: AnalysisState) -> dict:
                 d in primary_domain or primary_domain in d for d in available_domains
             ):
                 logger.info("[报告生成] 领域 '%s' 不在案例库覆盖范围 %s，跳过", primary_domain, available_domains)
+                analysis_result = build_case_analysis_result(
+                    report=report,
+                    sources=sources,
+                    claims=claims,
+                    case_summary=state.get("case_summary", ""),
+                    legal_relationships=state.get("legal_relationships", ""),
+                    user_input=state.get("user_input", ""),
+                    structured_data=structured_payload,
+                )
                 return {
                     "report": report,
+                    "analysis_result": analysis_result.model_dump(),
                     "sources": sources,
                     "case_results": case_results,
                 }
@@ -631,8 +682,18 @@ def generate_report(state: AnalysisState) -> dict:
         logger.warning("[报告生成] 案例检索失败: %s", e)
 
     logger.info("[报告生成] <<< 节点执行完毕，report=%d 字", len(report))
+    analysis_result = build_case_analysis_result(
+        report=report,
+        sources=sources,
+        claims=claims,
+        case_summary=state.get("case_summary", ""),
+        legal_relationships=state.get("legal_relationships", ""),
+        user_input=state.get("user_input", ""),
+        structured_data=structured_payload,
+    )
     return {
         "report": report,
+        "analysis_result": analysis_result.model_dump(),
         "sources": sources,
         "case_results": case_results,
     }
@@ -732,7 +793,7 @@ def run_analysis(user_input: str, session_id: str = "default",
     logger.info("[案情分析] 拆解完成，%d 个主张", len(claims))
     if not claims:
         return {"claims": [], "claim_contexts": [], "cross_analysis": "",
-                "time_nodes": [], "report": "", "sources": [], "case_results": []}
+                "time_nodes": [], "report": "", "analysis_result": {}, "sources": [], "case_results": []}
 
     if progress_callback:
         progress_callback({"type": "substep", "step": "decompose",
@@ -803,6 +864,7 @@ def run_analysis(user_input: str, session_id: str = "default",
         "cross_analysis": cross_result.get("cross_analysis", ""),
         "time_nodes": cross_result.get("time_nodes", []),
         "report": report_result.get("report", ""),
+        "analysis_result": report_result.get("analysis_result", {}),
         "sources": report_result.get("sources", []),
         "case_results": report_result.get("case_results", []),
     }

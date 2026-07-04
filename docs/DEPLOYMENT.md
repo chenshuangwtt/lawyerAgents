@@ -42,15 +42,17 @@ http://localhost:9000
 
 ```powershell
 cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 默认前端地址通常为：
 
 ```text
-http://localhost:5173
+http://localhost:3000
 ```
+
+如果 3000 端口已被占用，Vite 会自动尝试 3001、3002 等后续端口，请以控制台输出为准。
 
 ## 1.1 国内镜像源
 

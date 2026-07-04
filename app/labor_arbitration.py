@@ -5,11 +5,16 @@ from __future__ import annotations
 import calendar
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+from app.schemas.labor_arbitration import LaborArbitrationDraftInput, LaborArbitrationDraftResult, MissingField
+from app.source_item import SourceItem, normalize_sources
 
 
 DOC_TYPE = "labor_arbitration_application"
 DOC_TYPE_ALIASES = {"labor_arbitration", DOC_TYPE}
+TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "labor_arbitration.md.tpl"
 
 FIELD_LABELS = {
     "applicant_name": "申请人姓名",
@@ -114,6 +119,22 @@ REQUIRED_FIELDS = [
     "employment_end_date",
     "monthly_salary",
 ]
+
+CLARIFICATION_QUESTIONS = {
+    "applicant_name": "请补充申请人姓名。",
+    "respondent_name": "请补充被申请人单位名称。",
+    "employment_start_date": "请补充入职时间，最好精确到年月日。",
+    "employment_end_date": "请补充离职、辞退或劳动关系解除时间。",
+    "monthly_salary": "请补充月工资或离职前十二个月平均工资标准。",
+}
+
+MISSING_FIELD_REASONS = {
+    "applicant_name": "仲裁申请书必须明确申请人主体，系统不能代填姓名。",
+    "respondent_name": "仲裁申请书必须明确被申请人单位，系统不能猜测公司名称。",
+    "employment_start_date": "入职时间会影响劳动关系期间、二倍工资和赔偿金计算。",
+    "employment_end_date": "离职或解除时间会影响劳动关系期间、赔偿金和仲裁时效判断。",
+    "monthly_salary": "工资标准是工资、二倍工资和赔偿金计算的基础，系统不能编造金额。",
+}
 
 
 def canonical_doc_type(doc_type: str) -> str:
@@ -587,10 +608,23 @@ def missing_required_fields(fields: dict[str, Any]) -> list[str]:
     return [key for key in REQUIRED_FIELDS if not fields.get(key)]
 
 
+def build_missing_fields(missing: list[str]) -> list[MissingField]:
+    return [
+        MissingField(
+            field_name=key,
+            display_name=FIELD_LABELS.get(key, key),
+            reason=MISSING_FIELD_REASONS.get(key, f"生成文书前需要补充{FIELD_LABELS.get(key, key)}。"),
+            question=CLARIFICATION_QUESTIONS.get(key, f"请补充{FIELD_LABELS.get(key, key)}。"),
+            required=True,
+        )
+        for key in missing
+    ]
+
+
 def missing_fields_message(missing: list[str]) -> str:
     lines = ["生成劳动人事争议仲裁申请书前，还需要补充以下信息：", ""]
-    for i, key in enumerate(missing, 1):
-        lines.append(f"{i}. {FIELD_LABELS.get(key, key)}")
+    for i, item in enumerate(build_missing_fields(missing), 1):
+        lines.append(f"{i}. {item.display_name}：{item.question}")
     lines.extend(["", "请补充后，我将继续生成文书。"])
     return "\n".join(lines)
 
@@ -620,6 +654,70 @@ def _row(label: str, value: Any) -> str:
     return f"| {label} | {_escape_table(value)} |"
 
 
+def _load_template() -> str:
+    return TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+def _render_template(context: dict[str, Any]) -> str:
+    return _load_template().format_map({key: str(value) for key, value in context.items()})
+
+
+def _rows(items: list[tuple[str, Any]]) -> str:
+    return "\n".join(_row(label, value) for label, value in items)
+
+
+def _claim_rows(claims: list[str]) -> str:
+    items = claims or ["待补充"]
+    rows = []
+    for index in range(3):
+        value = items[index] if index < len(items) else "待补充"
+        rows.append(_row(f"请求 {index + 1}", value))
+    return "\n".join(rows)
+
+
+def infer_legal_basis(fields: dict[str, Any], text: str = "") -> list[SourceItem]:
+    """Infer common labor-law bases for the fielded draft without claiming exact quotes."""
+    claim_text = "\n".join(str(item) for item in fields.get("arbitration_claims") or [])
+    signals = f"{text}\n{claim_text}\n{fields.get('termination_reason', '')}"
+    basis: list[dict[str, Any]] = []
+
+    def add(law_name: str, article_no: str, reason: str) -> None:
+        title = f"{law_name} {article_no}"
+        basis.append({
+            "source_type": "statute",
+            "law_name": law_name,
+            "article_no": article_no,
+            "title": title,
+            "text": reason,
+            "source": title,
+            "content": reason,
+            "metadata": {"generated_for": DOC_TYPE, "basis_reason": reason},
+        })
+
+    if fields.get("has_written_contract") == "否" or "二倍工资" in signals or "未签" in signals:
+        add("中华人民共和国劳动合同法", "第八十二条", "未订立书面劳动合同二倍工资差额请求的常用依据。")
+    if re.search(r"违法解除|辞退|解雇|开除|解除劳动关系|赔偿金", signals):
+        add("中华人民共和国劳动合同法", "第四十七条", "经济补偿年限和计算基数相关依据。")
+        add("中华人民共和国劳动合同法", "第八十七条", "违法解除或终止劳动合同赔偿金相关依据。")
+    if re.search(r"拖欠工资|欠工资|工资未发|克扣工资", signals):
+        add("中华人民共和国劳动法", "第五十条", "工资应以货币形式按月支付、不得克扣或无故拖欠的相关依据。")
+    if fields.get("has_social_insurance") == "否" or "社保" in signals:
+        add("中华人民共和国社会保险法", "第五十八条", "用人单位为职工办理社会保险登记的相关依据。")
+
+    return [SourceItem(**item) for item in normalize_sources(basis)]
+
+
+def _legal_basis_block(items: list[SourceItem]) -> str:
+    if not items:
+        return "1. 待补充"
+    lines = []
+    for index, item in enumerate(items, 1):
+        title = item.title or f"{item.law_name}{item.article_no}".strip() or "待补充"
+        text = f"：{item.text}" if item.text else ""
+        lines.append(f"{index}. {title}{text}")
+    return "\n".join(lines)
+
+
 def render_labor_arbitration_application(fields: dict[str, Any]) -> str:
     other_facts = list(fields.get("facts") or [])
     if fields.get("has_written_contract") == "否":
@@ -635,103 +733,157 @@ def render_labor_arbitration_application(fields: dict[str, Any]) -> str:
         if note not in other_facts:
             other_facts.append(note)
 
-    document = f"""# 劳动人事争议仲裁申请书
+    legal_basis = fields.get("legal_basis")
+    if not legal_basis:
+        legal_basis = infer_legal_basis(fields)
+    source_items = [SourceItem(**item) for item in normalize_sources(legal_basis)]
+    context = {
+        "arbitration_commission": _value(fields, "arbitration_commission"),
+        "applicant_rows": _rows([
+            ("姓名", _value(fields, "applicant_name")),
+            ("性别", _value(fields, "applicant_gender")),
+            ("出生日期", _value(fields, "applicant_birth_date")),
+            ("公民身份号码", _value(fields, "applicant_id_number")),
+            ("联系电话", _value(fields, "applicant_phone")),
+            ("住所", _value(fields, "applicant_address")),
+            ("通讯地址", _value(fields, "applicant_mailing_address")),
+        ]),
+        "respondent_rows": _rows([
+            ("名称", _value(fields, "respondent_name")),
+            ("住所", _value(fields, "respondent_address")),
+            ("通讯地址", _value(fields, "respondent_mailing_address")),
+            ("法定代表人或主要负责人", _value(fields, "respondent_legal_rep")),
+            ("联络人及职务", _value(fields, "respondent_contact_person")),
+            ("联系电话", _value(fields, "respondent_phone")),
+        ]),
+        "claim_rows": _claim_rows(fields.get("arbitration_claims") or []),
+        "calculation_row": _row("仲裁请求计算公式", _numbered_table_value(fields.get("claim_calculation_formula") or [])),
+        "fact_rows": _rows([
+            ("入职时间", _value(fields, "employment_start_date")),
+            ("岗位及职务", _value(fields, "job_position")),
+            ("有无签订劳动合同", _value(fields, "has_written_contract")),
+            ("最后一期劳动合同期限", _value(fields, "contract_last_period")),
+            ("工作地点", _value(fields, "work_location")),
+            ("工作时间", _value(fields, "work_hours")),
+            ("是否需要考勤", _value(fields, "requires_attendance")),
+            ("考勤方式", _value(fields, "attendance_method")),
+            ("工资发放方式", _value(fields, "salary_payment_method")),
+            ("入职时工资标准", _value(fields, "initial_salary")),
+            ("工资标准调整情况", _value(fields, "salary_adjustment")),
+            ("现是否在职", _value(fields, "current_employment_status")),
+            ("离职时间", _value(fields, "employment_end_date")),
+            ("离职原因", _value(fields, "termination_reason")),
+            ("离职前 12 个月的月平均工资", _value(fields, "average_salary_12_months")),
+            ("其他需要说明的事实和理由", _numbered_table_value(_merge_list(fields.get("other_facts", ""), other_facts))),
+        ]),
+        "evidence_block": _numbered(fields.get("evidence_list") or []),
+        "legal_basis_block": _legal_basis_block(source_items),
+        "applicant_name": _value(fields, "applicant_name"),
+        "submit_date": datetime.now().strftime("%Y年%m月%d日"),
+    }
+    return _render_template(context)
 
-致：{_value(fields, "arbitration_commission")}
 
-## 一、申请人信息
+def clarification_questions_for_missing(missing: list[str]) -> list[str]:
+    return [
+        CLARIFICATION_QUESTIONS.get(key, f"请补充{FIELD_LABELS.get(key, key)}。")
+        for key in missing
+    ]
 
-| 项目 | 内容 |
-| --- | --- |
-{_row("姓名", _value(fields, "applicant_name"))}
-{_row("性别", _value(fields, "applicant_gender"))}
-{_row("出生日期", _value(fields, "applicant_birth_date"))}
-{_row("公民身份号码", _value(fields, "applicant_id_number"))}
-{_row("联系电话", _value(fields, "applicant_phone"))}
-{_row("住所", _value(fields, "applicant_address"))}
-{_row("通讯地址", _value(fields, "applicant_mailing_address"))}
 
-## 二、被申请人信息
+def _merge_legal_basis(
+    fields: dict[str, Any],
+    text: str,
+    legal_basis: list[Any] | None = None,
+) -> list[SourceItem]:
+    merged: list[Any] = []
+    merged.extend(legal_basis or [])
+    merged.extend(fields.get("legal_basis") or [])
+    merged.extend(infer_legal_basis(fields, text))
+    return [SourceItem(**item) for item in normalize_sources(merged)]
 
-| 项目 | 内容 |
-| --- | --- |
-{_row("名称", _value(fields, "respondent_name"))}
-{_row("住所", _value(fields, "respondent_address"))}
-{_row("通讯地址", _value(fields, "respondent_mailing_address"))}
-{_row("法定代表人或主要负责人", _value(fields, "respondent_legal_rep"))}
-{_row("联络人及职务", _value(fields, "respondent_contact_person"))}
-{_row("联系电话", _value(fields, "respondent_phone"))}
 
-## 三、仲裁请求
+def _build_draft_from_fields(
+    fields: dict[str, Any],
+    text: str,
+    *,
+    legal_basis: list[Any] | None = None,
+) -> LaborArbitrationDraftResult:
+    source_items = _merge_legal_basis(fields, text, legal_basis)
+    fields["legal_basis"] = [item.model_dump() for item in source_items]
+    missing = missing_required_fields(fields)
+    status = "need_more_info" if missing else "ready"
+    document = "" if missing else render_labor_arbitration_application(fields)
+    return LaborArbitrationDraftResult(
+        status=status,
+        applicant_name=str(fields.get("applicant_name") or ""),
+        applicant_contact=str(fields.get("applicant_phone") or ""),
+        respondent_name=str(fields.get("respondent_name") or ""),
+        work_start_date=str(fields.get("employment_start_date") or ""),
+        work_end_date=str(fields.get("employment_end_date") or ""),
+        monthly_salary=str(fields.get("monthly_salary") or ""),
+        claims=list(fields.get("arbitration_claims") or []),
+        facts_and_reasons=str(fields.get("facts_and_reasons") or ""),
+        evidence_list=list(fields.get("evidence_list") or []),
+        legal_basis=source_items,
+        missing_fields=build_missing_fields(missing),
+        clarification_questions=clarification_questions_for_missing(missing),
+        draft_markdown=document,
+        document_markdown=document,
+    )
 
-| 项目 | 内容 |
-| --- | --- |
-{_row("请求 1", (fields.get("arbitration_claims") or ["待补充"])[0])}
-{_row("请求 2", (fields.get("arbitration_claims") or ["", "待补充"])[1] if len(fields.get("arbitration_claims") or []) > 1 else "待补充")}
-{_row("请求 3", (fields.get("arbitration_claims") or ["", "", "待补充"])[2] if len(fields.get("arbitration_claims") or []) > 2 else "待补充")}
-{_row("仲裁请求计算公式", _numbered_table_value(fields.get("claim_calculation_formula") or []))}
 
-## 四、基本事实和理由
-
-| 项目 | 内容 |
-| --- | --- |
-{_row("入职时间", _value(fields, "employment_start_date"))}
-{_row("岗位及职务", _value(fields, "job_position"))}
-{_row("有无签订劳动合同", _value(fields, "has_written_contract"))}
-{_row("最后一期劳动合同期限", _value(fields, "contract_last_period"))}
-{_row("工作地点", _value(fields, "work_location"))}
-{_row("工作时间", _value(fields, "work_hours"))}
-{_row("是否需要考勤", _value(fields, "requires_attendance"))}
-{_row("考勤方式", _value(fields, "attendance_method"))}
-{_row("工资发放方式", _value(fields, "salary_payment_method"))}
-{_row("入职时工资标准", _value(fields, "initial_salary"))}
-{_row("工资标准调整情况", _value(fields, "salary_adjustment"))}
-{_row("现是否在职", _value(fields, "current_employment_status"))}
-{_row("离职时间", _value(fields, "employment_end_date"))}
-{_row("离职原因", _value(fields, "termination_reason"))}
-{_row("离职前 12 个月的月平均工资", _value(fields, "average_salary_12_months"))}
-{_row("其他需要说明的事实和理由", _numbered_table_value(_merge_list(fields.get("other_facts", ""), other_facts)))}
-
-## 五、证据目录
-
-{_numbered(fields.get("evidence_list") or [])}
-
-此致
-
-{_value(fields, "arbitration_commission")}
-
-免责声明：本文书由系统根据用户提供的信息辅助生成，仅供参考，不构成正式法律意见。提交前建议咨询专业律师或当地劳动仲裁机构。
-
-申请人：{_value(fields, "applicant_name")}
-
-提交日期：{datetime.now().strftime("%Y年%m月%d日")}
-"""
-    return document
+def build_labor_arbitration_draft(
+    text: str | LaborArbitrationDraftInput,
+    existing_fields: dict | None = None,
+    legal_basis: list[Any] | None = None,
+) -> LaborArbitrationDraftResult:
+    """Build a fielded labor arbitration draft result from user facts."""
+    if isinstance(text, LaborArbitrationDraftInput):
+        draft_input = text
+        source_text = draft_input.text
+        existing_fields = draft_input.existing_fields
+        legal_basis = draft_input.legal_basis
+    else:
+        source_text = text
+    fields = extract_labor_arbitration_fields(source_text, existing=existing_fields)
+    return _build_draft_from_fields(fields, source_text, legal_basis=legal_basis)
 
 
 def build_labor_document_result(text: str, existing_fields: dict | None = None) -> dict[str, Any]:
     fields = extract_labor_arbitration_fields(text, existing=existing_fields)
+    draft = _build_draft_from_fields(fields, text)
+    draft_payload = draft.model_dump()
     missing = missing_required_fields(fields)
     if missing:
+        structured_missing = [item.model_dump() for item in draft.missing_fields]
         return {
             "type": "document_generation_result",
             "doc_type": DOC_TYPE,
-            "status": "missing_fields",
-            "missing_fields": missing,
+            "status": "need_more_info",
+            "legacy_status": "missing_fields",
+            "missing_fields": structured_missing,
+            "missing_field_names": missing,
+            "clarification_questions": draft.clarification_questions,
             "extracted_fields": fields,
             "form_fields": fields,
+            "draft": draft_payload,
             "display_modes": ["form", "preview"],
             "message": missing_fields_message(missing),
         }
-    document = render_labor_arbitration_application(fields)
     return {
         "type": "document_generation_result",
         "doc_type": DOC_TYPE,
-        "status": "success",
+        "status": "ready",
+        "legacy_status": "success",
         "missing_fields": [],
+        "missing_field_names": [],
+        "clarification_questions": [],
         "extracted_fields": fields,
         "form_fields": fields,
+        "draft": draft_payload,
         "display_modes": ["form", "preview"],
-        "document_markdown": document,
+        "draft_markdown": draft.draft_markdown,
+        "document_markdown": draft.document_markdown,
         "warnings": ["本文书仅供参考，提交前建议咨询专业律师。"],
     }
