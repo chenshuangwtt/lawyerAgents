@@ -86,10 +86,15 @@ async def ask_document_stream(
                "detail": "字段提取完成"}
 
         if result.get("status") in {"need_more_info", "missing_fields"}:
+            missing_fields = result.get("missing_fields", [])
+            missing_field_names = result.get("missing_field_names", [])
+            clarification_questions = result.get("clarification_questions", [])
             set_pending_document(session_id, {
                 "doc_type": LABOR_DOC_TYPE,
                 "case_state": case_state or {},
                 "extracted_fields": fields,
+                "missing_fields": missing_fields,
+                "missing_field_names": missing_field_names,
             })
             answer = result.get("message", "")
             for line in answer.split("\n"):
@@ -104,9 +109,9 @@ async def ask_document_stream(
                 "doc_type": LABOR_DOC_TYPE,
                 "status": "need_more_info",
                 "legacy_status": result.get("legacy_status", "missing_fields"),
-                "missing_fields": result.get("missing_fields", []),
-                "missing_field_names": result.get("missing_field_names", []),
-                "clarification_questions": result.get("clarification_questions", []),
+                "missing_fields": missing_fields,
+                "missing_field_names": missing_field_names,
+                "clarification_questions": clarification_questions,
                 "extracted_fields": fields,
                 "document_result": result,
             }

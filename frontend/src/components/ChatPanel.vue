@@ -2,6 +2,7 @@
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { sendMessageStream, sendDocumentStream, getLaws, submitFeedback } from '../api.js'
 import MessageBubble from './MessageBubble.vue'
+/** @typedef {import('../types.js').CaseState} CaseState */
 
 const props = defineProps({
   sessionId: String,
@@ -66,6 +67,23 @@ function upsertSubstep(msg, data, fallbackStatus = '') {
   } else {
     msg.substeps.push(next)
   }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {CaseState|null}
+ */
+function parseCaseState(value) {
+  if (!value) return null
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+    } catch {
+      return null
+    }
+  }
+  return typeof value === 'object' && !Array.isArray(value) ? value : null
 }
 
 // --- 智能滚动 ---
@@ -161,6 +179,8 @@ async function onSend() {
     case_state: null,
     document_result: null,
     missing_fields: [],
+    clarification_questions: [],
+    document_markdown: '',
     record_id: null,
     feedback: null,
     time: new Date().toLocaleTimeString(),
@@ -201,8 +221,7 @@ async function onSend() {
           msg.risk_warning = data.risk_warning || ''
           msg.case_results = data.case_results || []
           if (data.case_state) {
-            msg.case_state = typeof data.case_state === 'string'
-              ? JSON.parse(data.case_state) : data.case_state
+            msg.case_state = parseCaseState(data.case_state)
           }
           if (data.record_id) msg.record_id = data.record_id
           // 法条就绪后立即解锁输入框（案情提取可能还在后台进行）
@@ -229,12 +248,15 @@ async function onSend() {
           if (data.risk_warning) msg.risk_warning = data.risk_warning
           if (data.case_results?.length) msg.case_results = data.case_results
           if (data.case_state) {
-            msg.case_state = typeof data.case_state === 'string'
-              ? JSON.parse(data.case_state) : data.case_state
+            msg.case_state = parseCaseState(data.case_state)
           }
           if (data.record_id) msg.record_id = data.record_id
           if (data.document_result) msg.document_result = data.document_result
           if (data.missing_fields) msg.missing_fields = data.missing_fields
+          if (data.clarification_questions) msg.clarification_questions = data.clarification_questions
+          if (data.document_markdown || data.document_result?.document_markdown) {
+            msg.document_markdown = data.document_markdown || data.document_result.document_markdown
+          }
           if (data.cached) msg.cached = true
           if (data.domain) msg.domain = data.domain
           if (data.domains) msg.domains = data.domains
@@ -267,7 +289,8 @@ async function onSend() {
 
 function onSuggestion(q) { input.value = q; onSend() }
 
-function onGenerateDocument({ document_type, doc_type, action, source, case_analysis_id, case_state }) {
+function onGenerateDocument({ document_type, doc_type, action, source, case_analysis_id, case_state, extra_info }) {
+  if (loading.value) return
   const docLabels = {
     labor_arbitration_application: '劳动仲裁申请书',
     labor_arbitration: '劳动仲裁申请书',
@@ -276,7 +299,11 @@ function onGenerateDocument({ document_type, doc_type, action, source, case_anal
   const label = docLabels[resolvedType] || resolvedType
 
   // 添加用户消息
-  props.messages.push({ role: 'user', content: `生成${label}`, time: new Date().toLocaleTimeString() })
+  props.messages.push({
+    role: 'user',
+    content: extra_info ? `继续生成${label}` : `生成${label}`,
+    time: new Date().toLocaleTimeString(),
+  })
 
   // 预占 assistant 消息位
   const msgIndex = props.messages.length
@@ -293,6 +320,8 @@ function onGenerateDocument({ document_type, doc_type, action, source, case_anal
     case_state: null,
     document_result: null,
     missing_fields: [],
+    clarification_questions: [],
+    document_markdown: '',
     time: new Date().toLocaleTimeString(),
     streaming: true,
     substeps: [],
@@ -309,6 +338,7 @@ function onGenerateDocument({ document_type, doc_type, action, source, case_anal
     source: source || 'case_analysis',
     case_analysis_id: case_analysis_id || case_state?.case_analysis_id || '',
     doc_type: resolvedType,
+    extra_info: extra_info || '',
   }, {
     onMeta(data) {
       const msg = props.messages[msgIndex]
@@ -344,8 +374,13 @@ function onGenerateDocument({ document_type, doc_type, action, source, case_anal
       if (msg) {
           msg.sources = data.sources || []
           msg.risk_warning = data.risk_warning || ''
+          msg.case_state = parseCaseState(data.case_state) || case_state || null
           if (data.document_result) msg.document_result = data.document_result
           if (data.missing_fields) msg.missing_fields = data.missing_fields
+          if (data.clarification_questions) msg.clarification_questions = data.clarification_questions
+          if (data.document_markdown || data.document_result?.document_markdown) {
+            msg.document_markdown = data.document_markdown || data.document_result.document_markdown
+          }
           upsertSubstep(msg, { step: 'generate', label: '生成回答', status: 'done', message: '文书生成完成' })
           msg.streaming = false
         }
@@ -491,7 +526,9 @@ watch(() => input.value, () => nextTick(adjustHeight))
           :intent="msg.intent"
           :case_state="msg.case_state"
           :document_result="msg.document_result"
+          :document_markdown="msg.document_markdown"
           :missing_fields="msg.missing_fields"
+          :clarification_questions="msg.clarification_questions"
           :record_id="msg.record_id"
           :feedback="msg.feedback"
           @generateDocument="onGenerateDocument"

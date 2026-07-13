@@ -35,6 +35,43 @@ class TestClassifyIntent:
     def test_personal_fact_pattern_can_enter_analysis(self):
         assert classify_intent("我在公司工作三年，上个月被辞退了，没有补偿，我该怎么维权？") == "analysis"
 
+    def test_labor_case_narrative_can_enter_analysis_without_explicit_request(self):
+        assert classify_intent("我在公司工作两年，没有签劳动合同，上个月被口头辞退，月工资8000，公司没给补偿。") == "analysis"
+
+    def test_analysis_and_document_workflow_starts_with_analysis(self):
+        question = (
+            "请帮我分析案情并生成后续文书。我叫张三，电话13800000000，"
+            "2022年3月1日入职北京星河科技有限公司，2024年4月30日被公司书面解除，月工资8000元。"
+        )
+
+        assert classify_intent(question) == "analysis"
+
+    def test_named_labor_case_without_first_person_enters_analysis(self):
+        question = (
+            "王五在杭州云舟信息技术有限公司做客服，月工资6500元，"
+            "上个月被口头辞退，没有签劳动合同，有工资流水和聊天记录。"
+        )
+
+        assert classify_intent(question) == "analysis"
+
+    def test_labor_noncompete_cross_case_enters_analysis(self):
+        question = (
+            "我从一家软件公司离职后去了竞争对手，公司说我违反竞业限制和保密协议，"
+            "还拖欠我最后两个月工资。我想知道劳动仲裁能不能一起处理。"
+        )
+
+        assert classify_intent(question) == "analysis"
+
+    @pytest.mark.parametrize("question", [
+        "我上个月被公司口头辞退，没签劳动合同，工资每月7000元，想先分析再准备劳动仲裁申请书。",
+        "朋友涉嫌盗窃被刑拘，家属想知道会不会判刑、能不能取保候审，请帮忙分析。",
+        "我在装修队干活，按天结算每天300元，干了三个多月受伤后老板不让我去了，也没签合同，只有微信转账和工友证言。",
+        "我是劳务派遣工，和派遣公司签了合同，被用工单位退回后派遣公司一直不给安排工作，也不给发工资。请分析能不能仲裁。",
+        "我在一家奶茶店上班半年，老板没有给我签劳动合同，突然让我不用来了，工资还有两个月没结。店没有告诉我营业执照名称。",
+    ])
+    def test_closed_loop_scenario_intents_enter_analysis(self, question):
+        assert classify_intent(question) == "analysis"
+
     # --- document ---
     def test_document_arbitration(self):
         assert classify_intent("帮我写一份劳动仲裁申请书") == "document"

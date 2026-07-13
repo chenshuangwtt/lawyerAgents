@@ -23,6 +23,24 @@ def test_non_labor_domain_blocks_broad_company_keyword():
     assert not is_labor_case_context(case_state)
 
 
+def test_company_shareholder_governance_blocks_misclassified_labor_action():
+    case_state = {
+        "primary_domain": "公司",
+        "case_type": "劳动争议",
+        "raw_input": "我是公司小股东，大股东长期不分红，还把客户资源转到关联公司，我想查账并追究责任。",
+    }
+    assert not is_labor_case_context(case_state)
+
+
+def test_shareholder_employee_labor_anchor_still_allows_action():
+    case_state = {
+        "primary_domain": "公司",
+        "case_type": "公司纠纷",
+        "raw_input": "我是公司小股东，也在公司上班，公司没有签劳动合同，现在把我辞退了。",
+    }
+    assert is_labor_case_context(case_state)
+
+
 def test_marriage_salary_question_does_not_show_labor_action():
     case_state = {
         "primary_domain": "婚姻",
@@ -39,4 +57,3 @@ def test_misclassified_contract_with_labor_anchor_allows_action():
         "raw_input": "公司一直没有签劳动合同，现在把我辞退了。",
     }
     assert is_labor_case_context(case_state)
-

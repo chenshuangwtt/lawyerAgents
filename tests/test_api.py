@@ -245,6 +245,68 @@ class TestChatValidation:
         assert resp.status_code == 422
 
 
+class TestChatStreamRouting:
+    def test_analysis_intent_bypasses_semantic_cache(self, client, monkeypatch):
+        import app.api as api_module
+        import app.analysis_chain as analysis_chain
+        import app.classifier as classifier
+
+        class CacheThatMustNotBeUsed:
+            def __init__(self):
+                self.lookup_calls = 0
+
+            def lookup(self, question):
+                self.lookup_calls += 1
+                return {
+                    "answer": "cached qa answer",
+                    "sources": [],
+                    "domain": "劳动",
+                }
+
+        cache = CacheThatMustNotBeUsed()
+        api_module.semantic_cache = cache
+        api_module.analysis_graph = MagicMock()
+        api_module.rag_components = {"enable_case_analysis": True}
+
+        monkeypatch.setattr(
+            classifier,
+            "classify_question_multi",
+            lambda llm, question, max_domains=3: {
+                "intent": "analysis",
+                "domain": "劳动",
+                "domains": ["劳动"],
+            },
+        )
+
+        async def fake_analysis_stream(*args, **kwargs):
+            yield {"type": "meta", "intent": "analysis", "domain": "劳动"}
+            yield {"type": "token", "content": "analysis answer"}
+            yield {
+                "type": "done",
+                "domain": "劳动",
+                "sources": [],
+                "case_state": {
+                    "case_type": "劳动争议",
+                    "available_actions": [
+                        {"doc_type": "labor_arbitration_application"},
+                    ],
+                },
+            }
+
+        monkeypatch.setattr(analysis_chain, "ask_analysis_stream", fake_analysis_stream)
+
+        resp = client.post(
+            "/api/chat/stream",
+            json={"question": "我在公司工作两年，没有签劳动合同，上个月被口头辞退，月工资8000，公司没给补偿。", "session_id": "route-test"},
+        )
+
+        assert resp.status_code == 200
+        assert cache.lookup_calls == 0
+        assert "cached qa answer" not in resp.text
+        assert "劳动争议" in resp.text
+        assert "labor_arbitration_application" in resp.text
+
+
 class TestSemanticCacheScheduling:
     def test_cache_store_runs_in_background(self, monkeypatch):
         """Semantic cache writes should not block SSE done responses."""

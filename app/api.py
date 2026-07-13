@@ -460,8 +460,25 @@ async def chat_stream(request: ChatRequest):
                 yield event
             return
 
+        # Intent detection must run before semantic cache lookup. Task-oriented
+        # flows such as case analysis/document generation need structured done
+        # payloads, and an older QA cache hit would otherwise hide case_state.
+        from app.classifier import classify_question_multi
+        intent = "qa"
+        classify_result = None
+        if ctx.analysis_graph and components.get("enable_case_analysis", True):
+            try:
+                classify_result = classify_question_multi(
+                    ctx.llm, request.question,
+                    max_domains=components.get("multi_domain_max_domains", 3),
+                )
+                intent = classify_result.get("intent", "qa")
+            except Exception as e:
+                logger.debug("[意图分类] 失败，回退 qa: %s", e)
+                intent = "qa"
+
         # 语义缓存命中 → 模拟流式回放
-        if ctx.semantic_cache:
+        if ctx.semantic_cache and intent not in {"analysis", "document"}:
             try:
                 cached = await asyncio.wait_for(
                     asyncio.to_thread(ctx.semantic_cache.lookup, request.question),
@@ -502,21 +519,6 @@ async def chat_stream(request: ChatRequest):
                     "_record_id": record_id,
                 }
                 return
-
-        # Intent detection
-        from app.classifier import classify_question_multi
-        intent = "qa"
-        classify_result = None
-        if ctx.analysis_graph and components.get("enable_case_analysis", True):
-            try:
-                classify_result = classify_question_multi(
-                    ctx.llm, request.question,
-                    max_domains=components.get("multi_domain_max_domains", 3),
-                )
-                intent = classify_result.get("intent", "qa")
-            except Exception as e:
-                logger.debug("[意图分类] 失败，回退 qa: %s", e)
-                intent = "qa"
 
         if intent == "analysis" and ctx.analysis_graph:
             from app.analysis_chain import ask_analysis_stream

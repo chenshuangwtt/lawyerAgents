@@ -292,8 +292,10 @@ def extract_labor_arbitration_fields(text: str, existing: dict | None = None) ->
     respondent_name = _first_match([
         r"被申请人(?:是|为)?([^，。,；;\n]+?(?:公司|有限公司|集团|厂|店|中心))",
         r"(?:公司|单位)(?:是|为|名称是)?([^，。,；;\n]+?(?:公司|有限公司|集团|厂|店|中心))",
+        r"入职([^，。,；;\n]+?(?:公司|有限公司|集团|厂|店|中心))",
+        r"在([^，。,；;\n]+?(?:公司|有限公司|集团))(?:工作|上班|任职)",
     ], text)
-    if respondent_name:
+    if respondent_name and not re.fullmatch(r"(?:一?家|某|某某)?(?:公司|单位|店|厂|中心|集团)", respondent_name):
         fields["respondent_name"] = respondent_name
 
     respondent_address = _first_match([
@@ -371,6 +373,10 @@ def extract_labor_arbitration_fields(text: str, existing: dict | None = None) ->
         fields["employment_start_date"] = _normalize_date(start_date)
 
     end_date = _first_match([
+        r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?)(?:被[^，。,；;\n]{0,8}辞退|口头辞退|离职|解除|开除)",
+        r"(\d{4}[年/-]\d{1,2}月?)(?:被[^，。,；;\n]{0,8}辞退|口头辞退|离职|解除|开除)",
+        r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?)被[^，。,；;\n]{0,8}解除",
+        r"(\d{4}[年/-]\d{1,2}月?)被[^，。,；;\n]{0,8}解除",
         r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?)(?:被辞退|离职|解除|开除)",
         r"(\d{4}[年/-]\d{1,2}月?)(?:被辞退|离职|解除|开除)",
     ], text)
@@ -378,8 +384,8 @@ def extract_labor_arbitration_fields(text: str, existing: dict | None = None) ->
         fields["employment_end_date"] = _normalize_date(end_date)
 
     salary = _first_match([
-        r"(?:月工资|工资|每月工资|每个月工资)(?:是|为)?\s*([0-9]+(?:\.[0-9]+)?\s*元?)",
-        r"([0-9]+(?:\.[0-9]+)?\s*元)(?:/月|每月|一个月|月工资)",
+        r"(?:月工资|月薪|薪资|工资标准|税前工资|税后工资|工资|每月工资|每个月工资)(?:是|为)?\s*([0-9]+(?:\.[0-9]+)?\s*元?)",
+        r"([0-9]+(?:\.[0-9]+)?\s*元)(?:/月|每月|一个月|月工资|月薪)",
     ], text)
     if salary:
         fields["monthly_salary"] = salary if "元" in salary else f"{salary}元"
@@ -622,7 +628,7 @@ def build_missing_fields(missing: list[str]) -> list[MissingField]:
 
 
 def missing_fields_message(missing: list[str]) -> str:
-    lines = ["生成劳动人事争议仲裁申请书前，还需要补充以下信息：", ""]
+    lines = ["还需要补充以下信息后才能生成劳动仲裁申请书：", ""]
     for i, item in enumerate(build_missing_fields(missing), 1):
         lines.append(f"{i}. {item.display_name}：{item.question}")
     lines.extend(["", "请补充后，我将继续生成文书。"])
@@ -857,13 +863,15 @@ def build_labor_document_result(text: str, existing_fields: dict | None = None) 
     missing = missing_required_fields(fields)
     if missing:
         structured_missing = [item.model_dump() for item in draft.missing_fields]
+        missing_display_names = [FIELD_LABELS.get(key, key) for key in missing]
         return {
             "type": "document_generation_result",
             "doc_type": DOC_TYPE,
             "status": "need_more_info",
             "legacy_status": "missing_fields",
-            "missing_fields": structured_missing,
-            "missing_field_names": missing,
+            "missing_fields": missing,
+            "missing_field_names": missing_display_names,
+            "missing_field_details": structured_missing,
             "clarification_questions": draft.clarification_questions,
             "extracted_fields": fields,
             "form_fields": fields,
@@ -878,6 +886,7 @@ def build_labor_document_result(text: str, existing_fields: dict | None = None) 
         "legacy_status": "success",
         "missing_fields": [],
         "missing_field_names": [],
+        "missing_field_details": [],
         "clarification_questions": [],
         "extracted_fields": fields,
         "form_fields": fields,

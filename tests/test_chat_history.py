@@ -55,6 +55,34 @@ class TestSaveAndGetRecords:
         assert records[0]["question"] == "劳动法规定试用期多久？"
         assert records[0]["domain"] == "劳动"
 
+    def test_save_and_retrieve_sources_and_case_state_for_closed_loop(self):
+        from app.chat_history import save_record, get_last_case_state, get_session_records
+        session_id = f"case-state-{uuid.uuid4().hex}"
+        case_state = '{"case_type":"劳动争议","available_actions":[{"doc_type":"labor_arbitration_application"}]}'
+
+        save_record(
+            session_id=session_id,
+            question="我被公司辞退，帮我分析案情。",
+            answer="案情分析结果",
+            sources=[
+                {
+                    "law_name": "中华人民共和国劳动合同法",
+                    "article_no": "第八十二条",
+                    "text": "用人单位自用工之日起超过一个月不满一年未与劳动者订立书面劳动合同的...",
+                    "source_type": "statute",
+                }
+            ],
+            domain="劳动",
+            case_state=case_state,
+        )
+
+        records = get_session_records(session_id)
+
+        assert records[0]["case_state"] == case_state
+        assert get_last_case_state(session_id) == case_state
+        assert records[0]["sources"][0]["law_name"] == "中华人民共和国劳动合同法"
+        assert records[0]["sources"][0]["source_type"] == "statute"
+
     def test_multiple_records_ordered(self):
         from app.chat_history import save_record, get_session_records
         session_id = f"s1-{uuid.uuid4().hex}"

@@ -111,6 +111,37 @@ def build_done_payload(event_payload: dict[str, Any]) -> dict[str, Any]:
     return done_data
 
 
+def merge_accumulated_done_payload(
+    accumulated_payload: dict[str, Any],
+    done_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge cached stream payload into final done payload.
+
+    ``done_payload`` wins when it carries an effective value. Cached
+    ``sources_ready`` fields fill gaps when the final event omits them or
+    carries empty placeholders such as [], "", None or {}.
+    """
+    merged = dict(done_payload)
+    for key, value in accumulated_payload.items():
+        if _is_effective_value(merged.get(key)):
+            continue
+        if _is_effective_value(value):
+            merged[key] = value
+    return merged
+
+
+def _is_effective_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if value == "":
+        return False
+    if value == []:
+        return False
+    if value == {}:
+        return False
+    return True
+
+
 def normalize_substep_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a stable public shape for all substep events."""
     step = str(payload.get("step") or "unknown")
@@ -156,6 +187,7 @@ async def sse_event_stream(
 ) -> AsyncIterator[str]:
     """Convert an internal async event stream to serialized SSE chunks."""
     answer_text = ""
+    accumulated_payload: dict[str, Any] = {}
     next_event_task: asyncio.Task | None = None
     terminal_sent = False
     try:
@@ -190,16 +222,36 @@ async def sse_event_stream(
                 answer_text += event.payload.get("content", "")
                 yield serialize_sse_event(event)
 
+            elif event_type == "sources_ready":
+                for key in (
+                    "sources",
+                    "risk_warning",
+                    "case_results",
+                    "citation_verification",
+                    "case_state",
+                ):
+                    if key in event.payload:
+                        accumulated_payload[key] = event.payload[key]
+                yield serialize_sse_event(event)
+
             elif event_type == "done":
                 done_data = build_done_payload(event.payload)
+                final_done_data = merge_accumulated_done_payload(
+                    accumulated_payload,
+                    done_data,
+                )
                 if "_record_id" in event.payload:
-                    done_data["record_id"] = event.payload["_record_id"]
+                    final_done_data["record_id"] = event.payload["_record_id"]
                 elif save_fn:
-                    record_id = save_fn({"type": "done", **event.payload}, answer_text)
-                    if record_id:
-                        done_data["record_id"] = record_id
+                    try:
+                        record_id = save_fn({"type": "done", **final_done_data}, answer_text)
+                        if record_id:
+                            final_done_data["record_id"] = record_id
+                    except Exception:
+                        if logger:
+                            logger.exception("[SSE] done 保存失败，继续返回 done 事件")
                 terminal_sent = True
-                yield serialize_sse_event(StreamEvent("done", done_data))
+                yield serialize_sse_event(StreamEvent("done", final_done_data))
                 break
 
             elif event_type == "error":

@@ -17,6 +17,7 @@ from app.core import _get_session_history, RISK_WARNING
 from app.case_analysis_store import save_case_analysis
 from app.labor_case_guard import is_labor_case_context
 from app.analysis_graph import filter_law_names_for_case, infer_law_hints
+from app.case_state_builder import LABOR_ARBITRATION_ACTION, build_case_state_enrichment
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,14 @@ async def ask_analysis_stream(
             primary_domain=primary_domain,
         )
 
+        case_state_enrichment = build_case_state_enrichment(
+            is_labor_case=is_labor_case,
+            case_analysis_id=analysis_record["case_analysis_id"],
+            question=question,
+            report=report,
+            structured_result=structured_result,
+            claims=claims,
+        )
         new_case_state = {
             "parties": [],
             "dispute_type": case_type,
@@ -205,6 +214,7 @@ async def ask_analysis_stream(
             "domains": analysis_record["domains"],
             "primary_domain": analysis_record["primary_domain"],
             "created_at": analysis_record["created_at"],
+            **case_state_enrichment,
         }
         try:
             from langchain_core.messages import HumanMessage, AIMessage

@@ -150,6 +150,74 @@ cache_hit_rate = cached=true 的请求数 / 总请求数
 4. 计算指标并保留失败样例。
 5. 对失败样例补充到回归测试或 prompt/retrieval 调整清单。
 
+## 闭环场景评测
+
+`run_scenario_eval.py` 用于从“RAG 命中评测”扩展到任务闭环验证。当前内置
+`eval/scenarios/labor_arbitration.jsonl`，覆盖：
+
+```text
+案情分析 -> case_state.available_actions -> /api/document -> 劳动仲裁申请书生成/追问
+```
+
+当前场景集包含 20 条样本：信息完整、缺工资、缺入职时间、缺单位名称、只有口头辞退、
+未签劳动合同与经济补偿混合请求、劳动争议与竞业/商业秘密交叉、补充一轮后生成、
+只补部分信息仍需追问，以及非劳动争议负例。
+
+`expect` 字段约定：
+
+- `case_type`：期望案情类型关键词，例如 `劳动争议`、`婚姻`。
+- `labor_case`：是否应识别为劳动争议；非劳动负例应设置为 `false`。
+- `required_action`：期望 `case_state.available_actions` 中出现的动作；只有设置该字段时才继续调用 `/api/document`。
+- `prohibited_action` / `prohibited_actions`：不应出现的动作，用于验证负例不展示劳动仲裁按钮。
+- `document_status`：文书生成期望状态，通常是 `need_more_info` 或 `ready`。
+- `required_fields_or_missing`：字段应被抽取到，或应出现在缺失字段/追问中。
+- `supplements`：可选的多轮补充列表；每项包含 `message` 以及本轮补充后的
+  `document_status`、`required_fields_or_missing` 等期望，用于验证 pending document
+  不丢失已抽取字段。
+
+失败会额外归类到 `failure_categories`，方便快速定位：
+
+- `intent_fail`：没有进入案情分析、没有返回 `case_state`，或案情类型识别错误。
+- `action_fail`：`available_actions` 缺少或错误展示劳动仲裁 action。
+- `document_status_fail`：文书生成状态不符合期望，或缺少 `document_result`。
+- `missing_field_fail`：字段既没有抽取到，也没有进入缺失字段/追问。
+- `ready_markdown_fail`：`ready` 但文书正文缺少核心标题。
+- `latency_fail`：配置了延迟阈值且超限。
+- `runtime_fail`：HTTP、连接或其他运行异常。
+
+默认会对 chat 阶段的瞬时空 `done`、断流或超时重试 1 次；字段抽取、action、
+文书内容等确定性失败不会被重试。可用 `--retries 0` 关闭。
+
+启动后端后运行：
+
+```powershell
+uv run python eval/run_scenario_eval.py --base-url http://localhost:9000
+```
+
+如需只回归某几条失败样例：
+
+```powershell
+uv run python eval/run_scenario_eval.py --base-url http://localhost:9000 --ids labor_016,labor_020
+```
+
+如需同时刷新闭环 baseline 说明：
+
+```powershell
+uv run python eval/run_scenario_eval.py --base-url http://localhost:9000 --write-baseline
+```
+
+默认输出：
+
+- `eval/scenario_results.jsonl`：逐样本 JSONL 结果。
+- `eval/scenario_report.md`：总览、失败原因和延迟报告。
+- `eval/baselines/labor_arbitration_closed_loop_baseline.md`：使用 `--write-baseline` 时生成的小型 baseline 说明。
+
+也可以输出 JSON 汇总：
+
+```powershell
+uv run python eval/run_scenario_eval.py --format json --output eval/scenario_report.json
+```
+
 ## 带检索 trace 的离线评测
 
 `run_eval.py` 是轻量 HTTP 回归脚本，适合检查线上接口是否退化；如果要分析召回质量，

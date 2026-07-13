@@ -2,6 +2,7 @@
  * 法律顾问 API 封装层
  */
 import axios from 'axios'
+/** @typedef {import('./types.js').DocumentStreamParams} DocumentStreamParams */
 
 const http = axios.create({ baseURL: '/api' })
 
@@ -25,32 +26,58 @@ async function parseSSEStream(reader, { onMeta, onToken, onDone, onError, onSubs
   const decoder = new TextDecoder()
   let buffer = ''
   let hasContent = false
+  let eventType = null
+  let dataLines = []
+
+  const dispatchEvent = () => {
+    if (!eventType || dataLines.length === 0) {
+      eventType = null
+      dataLines = []
+      return
+    }
+    const data = JSON.parse(dataLines.join('\n'))
+    if (eventType === 'meta') onMeta?.(data)
+    else if (eventType === 'token') { onToken?.(data); hasContent = true }
+    else if (eventType === 'done') onDone?.(data)
+    else if (eventType === 'substep') onSubstep?.(data)
+    else if (eventType === 'sources_preview') onSourcesPreview?.(data)
+    else if (eventType === 'sources_ready') onSourcesReady?.(data)
+    else if (eventType === 'error') onError?.(data.message, data)
+    eventType = null
+    dataLines = []
+  }
 
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
 
-    const lines = buffer.split('\n')
+    const lines = buffer.split(/\r?\n/)
     buffer = lines.pop()
 
-    let eventType = null
     for (const line of lines) {
+      if (line === '') {
+        dispatchEvent()
+        continue
+      }
+      if (line.startsWith(':')) {
+        continue
+      }
       if (line.startsWith('event: ')) {
         eventType = line.slice(7).trim()
-      } else if (line.startsWith('data: ') && eventType) {
-        const data = JSON.parse(line.slice(6))
-        if (eventType === 'meta') onMeta?.(data)
-        else if (eventType === 'token') { onToken?.(data); hasContent = true }
-        else if (eventType === 'done') onDone?.(data)
-        else if (eventType === 'substep') onSubstep?.(data)
-        else if (eventType === 'sources_preview') onSourcesPreview?.(data)
-        else if (eventType === 'sources_ready') onSourcesReady?.(data)
-        else if (eventType === 'error') onError?.(data.message, data)
-        eventType = null
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trimStart())
       }
     }
   }
+  buffer += decoder.decode()
+  if (buffer.trim()) {
+    for (const line of buffer.split(/\r?\n/)) {
+      if (line.startsWith('event: ')) eventType = line.slice(7).trim()
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+    }
+  }
+  dispatchEvent()
 
   return hasContent
 }
@@ -166,7 +193,7 @@ export function correctAnswer(recordId, answer) {
 /**
  * 生成法律文书（流式 SSE）。
  * @param {string} documentType
- * @param {object} params
+ * @param {DocumentStreamParams} params
  * @param {object} callbacks
  * @param {AbortSignal} [signal] - 可选的 AbortSignal，用于取消请求
  */

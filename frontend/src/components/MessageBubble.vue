@@ -4,6 +4,7 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import RagProgress from './RagProgress.vue'
 import SourceCard from './SourceCard.vue'
+/** @typedef {import('../types.js').CaseAction} CaseAction */
 
 const props = defineProps({
   role: String,
@@ -20,7 +21,9 @@ const props = defineProps({
   intent: { type: String, default: '' },
   case_state: { type: [Object, Array], default: null },
   document_result: { type: Object, default: null },
+  document_markdown: { type: String, default: '' },
   missing_fields: { type: Array, default: () => [] },
+  clarification_questions: { type: Array, default: () => [] },
   record_id: { type: Number, default: null },
   feedback: { type: Number, default: null },
 })
@@ -31,6 +34,7 @@ const showDocMenu = ref(false)
 const docView = ref('form')
 const editableDocFields = ref({})
 const copiedPreview = ref(false)
+const clickedActionKeys = ref(new Set())
 
 const docTypes = [
   { type: 'labor_arbitration_application', label: '劳动仲裁申请书' },
@@ -155,7 +159,7 @@ watch(
   (result) => {
     if (result) {
       editableDocFields.value = normalizeDocumentFields(result)
-      docView.value = 'form'
+      docView.value = result.status === 'ready' ? 'preview' : 'form'
     }
   },
   { immediate: true },
@@ -294,6 +298,9 @@ ${fieldValue('arbitration_commission')}
 
 const documentPreviewMarkdown = computed(() => {
   if (!hasDocumentResult.value) return ''
+  if (props.document_markdown) return props.document_markdown
+  if (props.document_result?.document_markdown) return props.document_result.document_markdown
+  if (props.document_result?.draft_markdown) return props.document_result.draft_markdown
   return renderLaborPreviewMarkdown(editableDocFields.value)
 })
 
@@ -330,9 +337,47 @@ function normalizeList(value) {
   return [String(value)]
 }
 
-const showLaborDocumentAction = computed(() => {
-  if (props.intent !== 'analysis' || props.streaming) return false
+function normalizeAvailableActions(value) {
+  if (!value) return []
+  const rawActions = Array.isArray(value) ? value : [value]
+  return rawActions.map((item) => normalizeCaseAction(item)).filter(Boolean)
+}
+
+/**
+ * @param {string|Partial<CaseAction>} item
+ * @returns {CaseAction|null}
+ */
+function normalizeCaseAction(item) {
+  if (!item) return null
+  if (typeof item === 'string') {
+    if (item !== 'generate_labor_arbitration_application') return null
+    return {
+      id: item,
+      type: 'generate_document',
+      doc_type: 'labor_arbitration_application',
+      label: '生成劳动仲裁申请书',
+      source: 'case_analysis',
+    }
+  }
+  const type = item.type || (item.id === 'generate_labor_arbitration_application' ? 'generate_document' : '')
+  const docType = item.doc_type || item.document_type || ''
+  if (type !== 'generate_document' || docType !== 'labor_arbitration_application') return null
+  return {
+    id: item.id || `${type}:${docType}`,
+    type,
+    doc_type: docType,
+    label: item.label || '生成劳动仲裁申请书',
+    source: item.source || 'case_analysis',
+    case_analysis_id: item.case_analysis_id || '',
+  }
+}
+
+const availableCaseActions = computed(() => {
+  if (props.intent !== 'analysis' || props.streaming) return []
   const cs = normalizedCaseState()
+  const actions = normalizeAvailableActions(cs.available_actions)
+  if (actions.length) return actions
+
   const primaryDomain = String(cs.primary_domain || props.domain || '').trim()
   const caseType = String(cs.case_type || cs.dispute_type || '').trim()
   const domains = [
@@ -341,9 +386,18 @@ const showLaborDocumentAction = computed(() => {
     ...normalizeList(props.domains),
   ]
 
-  if (primaryDomain === '劳动') return true
-  if (caseType.includes('劳动争议')) return true
-  if (domains.some(d => d === '劳动' || d === 'labor' || d === 'labour' || d === '劳动争议')) return true
+  const fallbackAction = {
+    id: 'generate_labor_arbitration_application',
+    type: 'generate_document',
+    doc_type: 'labor_arbitration_application',
+    label: '生成劳动仲裁申请书',
+    source: 'case_analysis',
+    case_analysis_id: cs.case_analysis_id || '',
+  }
+
+  if (primaryDomain === '劳动') return [fallbackAction]
+  if (caseType.includes('劳动争议')) return [fallbackAction]
+  if (domains.some(d => d === '劳动' || d === 'labor' || d === 'labour' || d === '劳动争议')) return [fallbackAction]
 
   const structuredText = [primaryDomain, caseType, domains.join(' ')].join(' ')
   const hasNonLaborSignal = NON_LABOR_DOMAINS.some(domain => structuredText.includes(domain))
@@ -354,10 +408,19 @@ const showLaborDocumentAction = computed(() => {
     Array.isArray(cs.key_facts) ? cs.key_facts.join('\n') : cs.key_facts,
   ].filter(Boolean).join('\n')
 
-  if (hasNonLaborSignal) return LABOR_ANCHOR_TERMS.some(kw => combinedText.includes(kw))
-  if (STRONG_LABOR_TERMS.some(kw => combinedText.includes(kw))) return true
+  if (hasNonLaborSignal) return LABOR_ANCHOR_TERMS.some(kw => combinedText.includes(kw)) ? [fallbackAction] : []
+  if (STRONG_LABOR_TERMS.some(kw => combinedText.includes(kw))) return [fallbackAction]
   const broadHits = [...BROAD_LABOR_TERMS].filter(kw => combinedText.includes(kw)).length
-  return broadHits >= 2
+  return broadHits >= 2 ? [fallbackAction] : []
+})
+
+const hasCaseActions = computed(() => availableCaseActions.value.length > 0)
+
+const clarificationQuestions = computed(() => {
+  const raw = props.clarification_questions?.length
+    ? props.clarification_questions
+    : props.document_result?.clarification_questions || []
+  return raw.map(item => String(item || '').trim()).filter(Boolean)
 })
 
 async function copyDocumentMarkdown() {
@@ -370,19 +433,50 @@ async function copyDocumentMarkdown() {
   }
 }
 
-function requestDocument(docType) {
+function actionKey(action) {
+  return `${action.type}:${action.doc_type}:${action.case_analysis_id || ''}`
+}
+
+function requestAction(action) {
   showDocMenu.value = false
-  let cs = props.case_state
-  if (typeof cs === 'string') {
-    try { cs = JSON.parse(cs) } catch { cs = null }
+  const key = actionKey(action)
+  if (clickedActionKeys.value.has(key)) return
+  clickedActionKeys.value = new Set([...clickedActionKeys.value, key])
+  const cs = normalizedCaseState()
+  emit('generateDocument', {
+    action: action.type,
+    doc_type: action.doc_type,
+    document_type: action.doc_type,
+    source: action.source || 'case_analysis',
+    case_analysis_id: action.case_analysis_id || cs?.case_analysis_id || '',
+    case_state: cs,
+  })
+}
+
+function buildDocumentExtraInfo() {
+  const lines = []
+  for (const section of documentFieldSections) {
+    for (const [key, label] of section.fields) {
+      const value = editableDocFields.value[key]
+      if (value && String(value).trim()) {
+        lines.push(`${label}：${String(value).trim()}`)
+      }
+    }
   }
+  return lines.join('\n')
+}
+
+function continueDocumentFromForm() {
+  const extraInfo = buildDocumentExtraInfo()
+  if (!extraInfo.trim()) return
   emit('generateDocument', {
     action: 'generate_document',
-    doc_type: docType,
-    document_type: docType,
-    source: 'case_analysis',
-    case_analysis_id: cs?.case_analysis_id || '',
-    case_state: cs,
+    doc_type: 'labor_arbitration_application',
+    document_type: 'labor_arbitration_application',
+    source: 'document_form',
+    case_analysis_id: normalizedCaseState()?.case_analysis_id || '',
+    case_state: normalizedCaseState(),
+    extra_info: extraInfo,
   })
 }
 
@@ -584,6 +678,13 @@ function toggleCase(ci) {
           </div>
           <div class="flex items-center gap-2">
             <button
+              v-if="(missing_fields?.length || document_result?.missing_fields?.length)"
+              class="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+              @click="continueDocumentFromForm"
+            >
+              使用表单内容继续生成
+            </button>
+            <button
               v-if="docView === 'preview'"
               class="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white text-gray-500 ring-1 ring-gray-200 hover:text-blue-600 hover:ring-blue-200 transition-colors"
               @click="copyDocumentMarkdown"
@@ -605,6 +706,16 @@ function toggleCase(ci) {
             class="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-600"
           >
             红色字段为生成文书前建议补充的关键信息；空白字段可先保留为“待补充”。
+          </div>
+
+          <div
+            v-if="clarificationQuestions.length"
+            class="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-700"
+          >
+            <div class="font-semibold mb-1">请继续补充：</div>
+            <ol class="list-decimal pl-4 space-y-1">
+              <li v-for="question in clarificationQuestions" :key="question">{{ question }}</li>
+            </ol>
           </div>
 
           <section v-for="section in documentFieldSections" :key="section.title" class="space-y-2">
@@ -753,17 +864,20 @@ function toggleCase(ci) {
       </div>
 
       <!-- 案情分析后的快捷操作 -->
-      <div v-if="showLaborDocumentAction" class="mt-3 relative inline-block">
+      <div v-if="hasCaseActions" class="mt-3 flex flex-wrap gap-2">
         <button
+          v-for="action in availableCaseActions"
+          :key="actionKey(action)"
           class="text-xs px-3 py-1.5 rounded-lg font-medium bg-blue-50 text-blue-600 ring-1 ring-blue-200 hover:bg-blue-100 transition-colors flex items-center gap-1.5"
-          aria-label="生成劳动仲裁申请书"
-          :aria-expanded="showDocMenu"
-          @click="requestDocument('labor_arbitration_application')"
+          :class="clickedActionKeys.has(actionKey(action)) ? 'opacity-60 cursor-not-allowed' : ''"
+          :aria-label="action.label"
+          :disabled="clickedActionKeys.has(actionKey(action))"
+          @click="requestAction(action)"
         >
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
           </svg>
-          生成劳动仲裁申请书
+          {{ clickedActionKeys.has(actionKey(action)) ? '已发起生成' : action.label }}
         </button>
       </div>
 

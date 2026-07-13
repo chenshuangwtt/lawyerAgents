@@ -65,6 +65,31 @@ _NON_LABOR_DOMAIN_VALUES = {
     "治安",
     "民事诉讼",
 }
+_COMPANY_GOVERNANCE_TERMS = {
+    "股东",
+    "小股东",
+    "大股东",
+    "分红",
+    "查账",
+    "关联公司",
+    "客户资源",
+    "出资",
+    "股权",
+    "董事",
+    "监事",
+    "公司章程",
+    "股东会",
+}
+
+
+def _looks_like_company_governance(raw_text: str) -> bool:
+    """Guard against misclassifying shareholder/company governance cases as labor."""
+    if not raw_text:
+        return False
+    governance_hits = sum(1 for term in _COMPANY_GOVERNANCE_TERMS if term in raw_text)
+    if governance_hits < 2:
+        return False
+    return not any(keyword in raw_text for keyword in _LABOR_ANCHOR_TERMS)
 
 
 def _as_text(value: Any) -> str:
@@ -102,6 +127,10 @@ def is_labor_case_context(case_state: dict[str, Any] | None, extra_text: str = "
     primary_domain = str(case_state.get("primary_domain") or "").strip()
     case_type = str(case_state.get("case_type") or case_state.get("dispute_type") or "").strip()
     domains = _as_list(case_state.get("domains")) + _as_list(case_state.get("domain_history"))
+    raw_text = _as_text(case_state.get("raw_input")) or extra_text
+
+    if _looks_like_company_governance(raw_text):
+        return False
 
     if primary_domain == "劳动":
         return True

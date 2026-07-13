@@ -6,6 +6,7 @@
 """
 
 import logging
+import re
 from typing import Dict, List, Set
 from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
@@ -48,7 +49,7 @@ for _group in load_synonym_groups():
         _SYNONYM_EXPANSIONS[_word] = _group_set
 
 _LABOR_PAY_TERMS = ["工资", "工资款", "薪资", "劳动报酬", "工资报酬"]
-_LABOR_RELATION_TERMS = ["员工", "劳动者", "公司", "老板", "用人单位", "单位"]
+_LABOR_RELATION_TERMS = ["员工", "劳动者", "公司", "老板", "用人单位", "单位", "店", "装修队", "派遣公司", "用工单位"]
 _PAY_MISAPPROPRIATION_TERMS = ["挪用", "侵占", "截留", "私吞", "扣发", "拖欠", "工资款"]
 _CRIMINAL_FOLLOWUP_TERMS = ["刑事责任", "追究刑事", "犯罪", "报案", "报警", "立案", "挪用资金", "职务侵占"]
 _TRADE_SECRET_TERMS = ["商业秘密", "客户名单", "客户资料", "竞争对手", "不正当竞争"]
@@ -66,11 +67,13 @@ _DOCUMENT_TYPE_TERMS = [
 ]
 _EXPLICIT_ANALYSIS_TERMS = [
     "分析案情", "案情分析", "帮我分析", "分析一下", "梳理案情",
+    "请分析", "帮忙分析", "请帮忙分析", "先分析", "分析并",
     "胜诉", "赢面", "证据缺口", "处理路径",
 ]
 _CASE_WORKFLOW_TERMS = [
     "怎么维权", "如何维权", "能告吗", "可以告吗", "怎么告",
     "能起诉吗", "能仲裁吗", "能赔多少", "赔偿多少", "打官司",
+    "能不能仲裁", "能否仲裁", "申请仲裁", "准备仲裁",
 ]
 _MULTI_DOMAIN_CUE_TERMS = [
     "同时", "能否", "能不能", "是否", "还", "又", "并", "以及",
@@ -83,6 +86,18 @@ _FACT_DETAIL_TERMS = [
     "被辞退", "辞退我", "开除我", "拖欠", "没签", "未签", "住院",
     "转账", "合同", "借条", "报警", "被打", "受伤", "工伤",
     "上个月", "去年", "今年", "三年", "两年", "一个月", "万元", "元",
+    "月工资", "工资流水", "聊天记录", "考勤", "离职", "竞业限制", "保密协议",
+    "每天", "按天", "半年", "三个多月", "不用来了", "工友证言", "被刑拘",
+]
+_LABOR_CASE_FACT_TERMS = [
+    "没有签劳动合同", "没签劳动合同", "未签劳动合同", "劳动合同",
+    "没签合同", "未签合同",
+    "被辞退", "口头辞退", "开除", "解除劳动关系", "解除合同",
+    "拖欠工资", "工资", "月工资", "薪资", "劳动报酬",
+    "经济补偿", "补偿", "赔偿金", "加班费", "社保",
+    "离职", "拖欠", "未支付", "竞业限制", "保密协议", "劳动仲裁",
+    "不用来了", "不给发工资", "劳务派遣", "派遣工", "用工单位",
+    "干活", "按天结算", "老板不让我", "工友证言", "微信转账",
 ]
 
 
@@ -177,11 +192,28 @@ def _looks_like_personal_case(question: str) -> bool:
     return detail_hits >= 1
 
 
+def _looks_like_personal_labor_case_narrative(question: str) -> bool:
+    """个人劳动争议事实叙述可直接进入案情分析，用于驱动后续文书动作。"""
+    has_person = _looks_like_personal_case(question)
+    has_specific_case_detail = bool(re.search(r"\d{4}年|\d+个月|上个月|去年|今年|[0-9]+元", question))
+    if not (has_person or has_specific_case_detail):
+        return False
+    if not any(term in question for term in _LABOR_RELATION_TERMS):
+        return False
+    labor_fact_hits = sum(1 for term in _LABOR_CASE_FACT_TERMS if term in question)
+    detail_hits = sum(1 for term in _FACT_DETAIL_TERMS if term in question)
+    if has_person:
+        return labor_fact_hits >= 2 and detail_hits >= 2
+    return len(question.strip()) >= 25 and labor_fact_hits >= 2 and detail_hits >= 2
+
+
 def _is_analysis_intent(question: str) -> bool:
     """案情分析入口收窄：显式分析请求，或个人具体案情 + 维权/诉讼路径请求。"""
     if any(term in question for term in _EXPLICIT_ANALYSIS_TERMS):
         return True
     if any(term in question for term in _CASE_WORKFLOW_TERMS) and _looks_like_personal_case(question):
+        return True
+    if _looks_like_personal_labor_case_narrative(question):
         return True
     return False
 
@@ -294,6 +326,8 @@ def classify_intent(question: str, segments: List[str] = None) -> str:
         segments = _segment_text(q)
 
     has_statute_keyword = any(_keyword_hit(kw, segments, q) for kw in _STATUTE_KEYWORDS)
+    if any(term in q for term in _EXPLICIT_ANALYSIS_TERMS):
+        return "analysis"
     if _is_document_intent(q):
         return "document"
     if has_statute_keyword:
@@ -491,5 +525,5 @@ def classify_question_multi(
             "is_multi_domain": False,
             "confidence": 0.0,
             "method": "fallback",
-            "intent": "qa",
+            "intent": classify_intent(question, segments),
         }
