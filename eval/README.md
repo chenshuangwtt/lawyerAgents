@@ -4,6 +4,10 @@
 `eval_dataset_30.jsonl`，用于固定召回 baseline；`questions_expanded.jsonl`
 用于更大范围的扩展回归。
 
+根目录只保留当前可运行入口、稳定 baseline、核心数据集和最近一次轻量输出。
+历史调参报告、临时 JSONL 和较大的实验结果已归档到 `archive/experiments/`，
+便于审计但不干扰日常演示。
+
 ## 数据格式
 
 每行一个 JSON：
