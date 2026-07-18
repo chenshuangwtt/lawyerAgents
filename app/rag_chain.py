@@ -53,6 +53,7 @@ from app.rag_retrieval import (
     rerank_documents,
 )
 from app.rag_query_expansion import build_retrieval_query
+from app.source_authority import source_authority_risk_warning
 
 logger = logging.getLogger(__name__)
 
@@ -485,7 +486,10 @@ def _post_process_answer(
         "case_results": case_results,
         "case_state": new_case_state,
         "citation_verification": citation_verification,
-        "risk_warning": _risk_warning_with_citation_check(RISK_WARNING, citation_verification),
+        "risk_warning": _risk_warning_with_source_authority(
+            _risk_warning_with_citation_check(RISK_WARNING, citation_verification),
+            sources,
+        ),
     }
 
 
@@ -508,6 +512,14 @@ def _risk_warning_with_citation_check(base_warning: str, citation_verification: 
     if _UNVERIFIED_CITATION_WARNING in base_warning:
         return base_warning
     return f"{base_warning} {_UNVERIFIED_CITATION_WARNING}。"
+
+
+def _risk_warning_with_source_authority(base_warning: str, sources: list[dict[str, Any]]) -> str:
+    warning = source_authority_risk_warning(sources)
+    if not warning or warning in base_warning:
+        return base_warning
+    separator = "" if base_warning.endswith(("。", "！", "？")) else "。"
+    return f"{base_warning}{separator} {warning}"
 
 
 def _is_simple_query(question: str) -> bool:
@@ -573,6 +585,8 @@ def build_rag_chain(
     source_coverage_max_sources: int = 3,
     source_coverage_per_source: int = 1,
     adjacent_range: int = 1,
+    enable_authority_weighting: bool = True,
+    authority_boost_factor: float = 0.08,
     enable_classification: bool = True,
     memory_keep_recent_rounds: int = 3,
     memory_summary_trigger_rounds: int = 5,
@@ -626,6 +640,8 @@ def build_rag_chain(
         "source_coverage_max_sources": source_coverage_max_sources,
         "source_coverage_per_source": source_coverage_per_source,
         "adjacent_range": adjacent_range,
+        "enable_authority_weighting": enable_authority_weighting,
+        "authority_boost_factor": authority_boost_factor,
         "enable_classification": enable_classification,
     }
 
@@ -1015,7 +1031,10 @@ async def ask_stream(
                 output_count=len(citation_verification.get("matched_citations", [])),
                 message="引用核验完成" if citation_verification.get("verified") else "存在未核验引用",
             )
-            risk_warning = _risk_warning_with_citation_check(RISK_WARNING, citation_verification)
+            risk_warning = _risk_warning_with_source_authority(
+                _risk_warning_with_citation_check(RISK_WARNING, citation_verification),
+                sources,
+            )
             # 等待案例检索完成
             case_results = await case_future if case_future else []
 
@@ -1290,7 +1309,10 @@ async def _ask_stream_graph(
         output_count=len(citation_verification.get("matched_citations", [])),
         message="引用核验完成" if citation_verification.get("verified") else "存在未核验引用",
     )
-    risk_warning = _risk_warning_with_citation_check(RISK_WARNING, citation_verification)
+    risk_warning = _risk_warning_with_source_authority(
+        _risk_warning_with_citation_check(RISK_WARNING, citation_verification),
+        sources,
+    )
     case_results = await case_future
 
     # 立即 yield sources_ready（法条 + 风险提示 + 案例）

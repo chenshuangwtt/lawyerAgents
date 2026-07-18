@@ -16,6 +16,8 @@ from pathlib import Path
 
 import jieba
 
+from app.source_authority import get_authority_label, get_authority_weight
+
 logger = logging.getLogger(__name__)
 
 
@@ -268,6 +270,16 @@ class CaseSearcher:
         sorted_keys = sorted(rrf_scores, key=rrf_scores.get, reverse=True)
         return [case_map[k] for k in sorted_keys[:top_k]]
 
+    def _with_legacy_authority(self, case: Dict) -> Dict:
+        return {
+            **case,
+            "source_type": case.get("source_type") or "legacy_case",
+            "source_name": case.get("source_name") or "legacy_cases",
+            "source_level": "legacy_case",
+            "authority_weight": get_authority_weight("legacy_case"),
+            "authority_label": get_authority_label("legacy_case"),
+        }
+
     # 案例库中 legal_domain 的常见值
     _LEGAL_DOMAIN_ALIASES = {
         "刑事": ["刑事", "criminal"],
@@ -347,7 +359,7 @@ class CaseSearcher:
             filtered = [r for r in results if self._domain_matches(r.get("legal_domain", ""), domain)]
             results = filtered if filtered else []
 
-        return results[:top_k]
+        return [self._with_legacy_authority(case) for case in results[:top_k]]
 
     def close(self):
         if self._conn:

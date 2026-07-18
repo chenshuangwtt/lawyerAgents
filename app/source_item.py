@@ -8,6 +8,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.source_authority import (
+    enrich_authority_metadata,
+    get_authority_label,
+    get_authority_weight,
+    infer_source_level,
+    normalize_source_level,
+)
+
 
 SourceType = Literal["statute", "interpretation", "case", "user_document", "unknown"]
 
@@ -37,7 +45,11 @@ class SourceItem(BaseModel):
     title: str = Field(default="", description="Display title")
     text: str = Field(default="", description="Source text")
     file_path: str = Field(default="", description="Original file path")
-    effective_status: str = Field(default="", description="Effective status if known")
+    source_level: str = Field(default="unknown", description="Authority level of the source")
+    authority_weight: float = Field(default=0.50, description="Authority weight used for display and ranking")
+    authority_label: str = Field(default="未知来源", description="Human-readable authority label")
+    effective_status: str = Field(default="unknown", description="Effective status if known")
+    publish_date: str = Field(default="", description="Publish date if known")
     confidence: float | str | None = Field(default=None, description="Citation confidence")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Raw source metadata")
 
@@ -95,15 +107,28 @@ def normalize_source(source: Any, docs: list[Any] | None = None) -> dict[str, An
     full_content = str(raw.get("full_content") or text)
     file_path = str(raw.get("file_path") or metadata.get("file_path") or "")
     title = str(raw.get("title") or _build_title(law_name, article_no, label))
-    source_type = _normalize_source_type(raw.get("source_type") or metadata.get("source_type") or metadata.get("doc_type"), law_name, title)
+    legacy_label = label or _build_title(law_name, article_no, title)
+    source_level = normalize_source_level(raw.get("source_level") or metadata.get("source_level"))
+    if source_level == "unknown":
+        source_level = infer_source_level(metadata, file_path=file_path, source=legacy_label or law_name or title)
+    metadata = enrich_authority_metadata(metadata, file_path=file_path, source=legacy_label or law_name or title)
+    metadata["source_level"] = source_level
+    metadata["authority_weight"] = _coerce_weight(raw.get("authority_weight") or metadata.get("authority_weight"), source_level)
+    metadata["authority_label"] = str(raw.get("authority_label") or metadata.get("authority_label") or get_authority_label(source_level))
+    source_type = _normalize_source_type(
+        raw.get("source_type") or metadata.get("source_type") or metadata.get("doc_type"),
+        law_name,
+        title,
+        source_level,
+    )
     effective_status = str(
         raw.get("effective_status")
         or metadata.get("effective_status")
         or metadata.get("status")
-        or ""
+        or "unknown"
     )
+    publish_date = str(raw.get("publish_date") or metadata.get("publish_date") or metadata.get("effective_date") or "")
     confidence = raw.get("confidence")
-    legacy_label = label or _build_title(law_name, article_no, title)
 
     item = {
         "source_id": str(raw.get("source_id") or _make_source_id(source_type, law_name, article_no, file_path, text)),
@@ -114,7 +139,11 @@ def normalize_source(source: Any, docs: list[Any] | None = None) -> dict[str, An
         "title": title,
         "text": text,
         "file_path": file_path,
+        "source_level": source_level,
+        "authority_weight": metadata["authority_weight"],
+        "authority_label": metadata["authority_label"],
         "effective_status": effective_status,
+        "publish_date": publish_date,
         "confidence": confidence,
         "metadata": metadata,
         "source": legacy_label,
@@ -190,7 +219,7 @@ def _build_title(law_name: str, article_no: str, fallback: str) -> str:
     return law_name or fallback or "未知来源"
 
 
-def _normalize_source_type(value: Any, law_name: str, title: str) -> SourceType:
+def _normalize_source_type(value: Any, law_name: str, title: str, source_level: str = "unknown") -> SourceType:
     raw = str(value or "").strip().lower()
     if raw in _ALLOWED_SOURCE_TYPES:
         return raw  # type: ignore[return-value]
@@ -199,6 +228,15 @@ def _normalize_source_type(value: Any, law_name: str, title: str) -> SourceType:
     if raw in {"judicial_interpretation", "interpretation_doc"}:
         return "interpretation"
     if raw in {"user_doc", "uploaded_document", "document"}:
+        return "user_document"
+
+    if source_level == "law":
+        return "statute"
+    if source_level == "judicial_interpretation":
+        return "interpretation"
+    if source_level in {"official_case", "legacy_case"}:
+        return "case"
+    if source_level == "local_document":
         return "user_document"
 
     name = f"{law_name} {title}"
@@ -273,3 +311,10 @@ def _find_matching_doc(docs: list[Any], law_name: str, article_no: str) -> Any |
 
 def _law_key(name: str) -> str:
     return re.sub(r"\s+", "", str(name or "").replace("中华人民共和国", ""))
+
+
+def _coerce_weight(value: Any, source_level: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return get_authority_weight(source_level)

@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from langchain_core.documents import Document
 from app.docx_reader import read_docx_text
 from app.lightweight_text_splitter import RecursiveCharacterTextSplitter
+from app.source_authority import enrich_authority_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -542,10 +543,15 @@ def load_documents(
         # 去除文件名末尾的日期（如 _20221228）
         law_name = raw_name.rsplit("_", 1)[0] if "_" in raw_name else raw_name
         text = read_docx_text(filepath)
+        metadata = enrich_authority_metadata(
+            {"source": law_name, "file_path": str(filepath), "effective_status": "unknown"},
+            file_path=str(filepath),
+            source=law_name,
+        )
         return [
             Document(
                 page_content=text,
-                metadata={"source": law_name, "file_path": str(filepath)},
+                metadata=metadata,
             )
         ]
 

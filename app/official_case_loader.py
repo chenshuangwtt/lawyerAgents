@@ -16,6 +16,8 @@ from typing import Dict, List
 
 import jieba
 
+from app.source_authority import get_authority_label, get_authority_weight
+
 logger = logging.getLogger(__name__)
 
 
@@ -726,6 +728,9 @@ class OfficialCaseSearcher:
             "source": case.get("source", "人民法院案例库 / 最高人民法院指导性案例"),
             "source_type": "official_case",
             "source_name": "official_cases",
+            "source_level": "official_case",
+            "authority_weight": get_authority_weight("official_case"),
+            "authority_label": get_authority_label("official_case"),
             "source_url": case.get("source_url", ""),
         }
 

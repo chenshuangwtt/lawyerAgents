@@ -73,10 +73,35 @@ def _batch_cosine_similarity(query_vec: List[float], matrix) -> List[float]:
     return sims.tolist()
 
 
-def _question_hash(question: str) -> str:
-    """问题文本的 SHA256 hash（标准化后）。"""
-    normalized = question.strip().lower()
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+def _normalize_question(question: str) -> str:
+    """Normalize text before hashing and embedding lookup."""
+    return " ".join(str(question or "").strip().lower().split())
+
+
+def _question_hash(
+    question: str,
+    *,
+    intent: str = "",
+    domain: str = "",
+    index_version: str = "",
+    policy_version: str = "",
+    document_type: str = "",
+) -> str:
+    """Scoped SHA256 hash for one cacheable task result."""
+    normalized = _normalize_question(question)
+    parts = [
+        normalized,
+        _normalize_scope_value(intent),
+        _normalize_scope_value(domain),
+        _normalize_scope_value(index_version),
+        _normalize_scope_value(policy_version),
+        _normalize_scope_value(document_type),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _normalize_scope_value(value: str) -> str:
+    return str(value or "").strip().lower()
 
 
 def _pack_embedding(vec: List[float]) -> bytes:
@@ -124,21 +149,30 @@ class SemanticCache:
             CREATE TABLE IF NOT EXISTS semantic_cache (
                 question_hash  TEXT PRIMARY KEY,
                 question       TEXT NOT NULL,
+                normalized_question TEXT NOT NULL DEFAULT '',
                 embedding      BLOB NOT NULL,
                 answer         TEXT NOT NULL,
                 sources        TEXT NOT NULL DEFAULT '[]',
+                intent         TEXT NOT NULL DEFAULT '',
                 domain         TEXT NOT NULL DEFAULT '',
+                index_version  TEXT NOT NULL DEFAULT '',
+                policy_version TEXT NOT NULL DEFAULT '',
+                document_type  TEXT NOT NULL DEFAULT '',
                 case_results   TEXT NOT NULL DEFAULT '[]',
+                metadata       TEXT NOT NULL DEFAULT '{}',
                 hit_count      INTEGER NOT NULL DEFAULT 0,
                 created_at     TEXT NOT NULL,
                 last_hit_at    TEXT NOT NULL
             )
         """)
         # 兼容旧表：补列
-        try:
-            self._conn.execute("ALTER TABLE semantic_cache ADD COLUMN case_results TEXT NOT NULL DEFAULT '[]'")
-        except sqlite3.OperationalError:
-            pass
+        self._add_column_if_missing("case_results", "TEXT NOT NULL DEFAULT '[]'")
+        self._add_column_if_missing("normalized_question", "TEXT NOT NULL DEFAULT ''")
+        self._add_column_if_missing("intent", "TEXT NOT NULL DEFAULT ''")
+        self._add_column_if_missing("index_version", "TEXT NOT NULL DEFAULT ''")
+        self._add_column_if_missing("policy_version", "TEXT NOT NULL DEFAULT ''")
+        self._add_column_if_missing("document_type", "TEXT NOT NULL DEFAULT ''")
+        self._add_column_if_missing("metadata", "TEXT NOT NULL DEFAULT '{}'")
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS app_migrations (
                 name TEXT PRIMARY KEY,
@@ -146,6 +180,12 @@ class SemanticCache:
             )
         """)
         self._conn.commit()
+
+    def _add_column_if_missing(self, name: str, declaration: str) -> None:
+        try:
+            self._conn.execute(f"ALTER TABLE semantic_cache ADD COLUMN {name} {declaration}")
+        except sqlite3.OperationalError:
+            pass
 
     def _migrate_legacy_cache(self):
         """首次切换到 app.sqlite3 时导入旧 semantic_cache.db，保留旧文件不删除。"""
@@ -172,11 +212,17 @@ class SemanticCache:
                 defaults = {
                     "question_hash": "''",
                     "question": "''",
+                    "normalized_question": "''",
                     "embedding": "x''",
                     "answer": "''",
                     "sources": "'[]'",
+                    "intent": "''",
                     "domain": "''",
+                    "index_version": "''",
+                    "policy_version": "''",
+                    "document_type": "''",
                     "case_results": "'[]'",
+                    "metadata": "'{}'",
                     "hit_count": "0",
                     "created_at": "datetime('now')",
                     "last_hit_at": "datetime('now')",
@@ -188,8 +234,10 @@ class SemanticCache:
                 self._conn.execute(
                     f"""
                     INSERT OR IGNORE INTO semantic_cache (
-                        question_hash, question, embedding, answer, sources,
-                        domain, case_results, hit_count, created_at, last_hit_at
+                        question_hash, question, normalized_question, embedding,
+                        answer, sources, intent, domain, index_version,
+                        policy_version, document_type, case_results, metadata,
+                        hit_count, created_at, last_hit_at
                     )
                     SELECT {select_cols} FROM legacy_cache.semantic_cache
                     """
@@ -231,7 +279,17 @@ class SemanticCache:
             self._conn.commit()
             logger.info("[语义缓存] 清理: 过期=%d, 淘汰=%d", expired, evicted)
 
-    def lookup(self, question: str) -> Optional[Dict]:
+    def lookup(
+        self,
+        question: str,
+        *,
+        intent: str = "qa",
+        domain: str = "",
+        index_version: str = "",
+        policy_version: str = "",
+        document_type: str = "",
+        exact_only: bool = False,
+    ) -> Optional[Dict]:
         """
         查找缓存。先精确匹配，再语义匹配。
 
@@ -241,13 +299,20 @@ class SemanticCache:
         if self._closed:
             raise RuntimeError("SemanticCache has been closed")
 
-        q_hash = _question_hash(question)
+        scope = self._scope(
+            intent=intent,
+            domain=domain,
+            index_version=index_version,
+            policy_version=policy_version,
+            document_type=document_type,
+        )
+        q_hash = _question_hash(question, **scope)
 
         # 1. 精确匹配
         row = self._conn.execute(
             "SELECT * FROM semantic_cache WHERE question_hash = ?", (q_hash,)
         ).fetchone()
-        if row:
+        if row and self._row_matches_scope(row, scope):
             with self._lock:
                 self._conn.execute(
                     "UPDATE semantic_cache SET hit_count = hit_count + 1, last_hit_at = ? WHERE question_hash = ?",
@@ -256,6 +321,8 @@ class SemanticCache:
                 self._conn.commit()
             logger.info("[语义缓存] 精确命中: %s", question[:40])
             return self._row_to_result(row)
+        if exact_only:
+            return None
 
         # 2. 语义匹配
         try:
@@ -265,7 +332,7 @@ class SemanticCache:
             return None
 
         # 使用内存缓存的 embedding 矩阵，避免每次全量加载
-        cached_hashes, cached_matrix = self._load_embeddings_cache()
+        cached_hashes, cached_matrix = self._load_embeddings_cache(**scope)
         if not cached_hashes:
             return None
 
@@ -301,15 +368,36 @@ class SemanticCache:
 
         return None
 
-    def store(self, question: str, answer: str, sources: List[Dict], domain: str, case_results: List[Dict] = None):
+    def store(
+        self,
+        question: str,
+        answer: str,
+        sources: List[Dict],
+        domain: str,
+        case_results: List[Dict] = None,
+        *,
+        intent: str = "qa",
+        index_version: str = "",
+        policy_version: str = "",
+        document_type: str = "",
+        metadata: Dict | None = None,
+    ):
         """写入缓存。"""
         if self._closed:
             raise RuntimeError("SemanticCache has been closed")
 
-        q_hash = _question_hash(question)
+        scope = self._scope(
+            intent=intent,
+            domain=domain,
+            index_version=index_version,
+            policy_version=policy_version,
+            document_type=document_type,
+        )
+        normalized_question = _normalize_question(question)
+        q_hash = _question_hash(question, **scope)
 
         try:
-            vec = self._embeddings.embed_query(question)
+            vec = self._embeddings.embed_query(normalized_question)
         except Exception as e:
             logger.warning("[语义缓存] 写入失败 (embedding): %s", e)
             return
@@ -318,11 +406,27 @@ class SemanticCache:
         with self._lock:
             self._conn.execute("""
                 INSERT OR REPLACE INTO semantic_cache
-                (question_hash, question, embedding, answer, sources, domain, case_results, hit_count, created_at, last_hit_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-            """, (q_hash, question.strip(), _pack_embedding(vec), answer,
-                  json.dumps(normalize_sources(sources), ensure_ascii=False), domain,
-                  json.dumps(case_results or [], ensure_ascii=False), now, now))
+                (question_hash, question, normalized_question, embedding, answer,
+                 sources, intent, domain, index_version, policy_version,
+                 document_type, case_results, metadata, hit_count, created_at, last_hit_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """, (
+                q_hash,
+                question.strip(),
+                normalized_question,
+                _pack_embedding(vec),
+                answer,
+                json.dumps(normalize_sources(sources), ensure_ascii=False),
+                scope["intent"],
+                scope["domain"],
+                scope["index_version"],
+                scope["policy_version"],
+                scope["document_type"],
+                json.dumps(case_results or [], ensure_ascii=False),
+                json.dumps(metadata or {}, ensure_ascii=False),
+                now,
+                now,
+            ))
             self._conn.commit()
             self._embedding_cache = None  # 失效缓存
 
@@ -338,20 +442,52 @@ class SemanticCache:
         return {
             "answer": row["answer"],
             "sources": normalize_sources(json.loads(row["sources"])),
+            "intent": row["intent"] if "intent" in row.keys() else "",
             "domain": row["domain"],
+            "index_version": row["index_version"] if "index_version" in row.keys() else "",
+            "policy_version": row["policy_version"] if "policy_version" in row.keys() else "",
+            "document_type": row["document_type"] if "document_type" in row.keys() else "",
             "case_results": json.loads(row["case_results"]),
+            "metadata": json.loads(row["metadata"]) if "metadata" in row.keys() else {},
             "cached": True,
         }
 
-    def _load_embeddings_cache(self):
+    def _load_embeddings_cache(
+        self,
+        *,
+        intent: str = "",
+        domain: str = "",
+        index_version: str = "",
+        policy_version: str = "",
+        document_type: str = "",
+    ):
         """懒加载并缓存 embedding 矩阵。store() 后自动失效。"""
-        if self._embedding_cache is not None:
-            return self._embedding_cache
+        scope = self._scope(
+            intent=intent,
+            domain=domain,
+            index_version=index_version,
+            policy_version=policy_version,
+            document_type=document_type,
+        )
+        cache_key = tuple(scope.values())
+        if isinstance(self._embedding_cache, dict) and cache_key in self._embedding_cache:
+            return self._embedding_cache[cache_key]
 
         try:
             import numpy as np
             rows = self._conn.execute(
-                "SELECT question_hash, embedding FROM semantic_cache"
+                """
+                SELECT question_hash, embedding FROM semantic_cache
+                WHERE intent = ? AND domain = ? AND index_version = ?
+                  AND policy_version = ? AND document_type = ?
+                """,
+                (
+                    scope["intent"],
+                    scope["domain"],
+                    scope["index_version"],
+                    scope["policy_version"],
+                    scope["document_type"],
+                ),
             ).fetchall()
             if not rows:
                 return [], np.empty((0, 0), dtype=np.float32)
@@ -360,15 +496,57 @@ class SemanticCache:
                 [_unpack_embedding(r["embedding"]) for r in rows],
                 dtype=np.float32,
             )
-            self._embedding_cache = (hashes, matrix)
-            return self._embedding_cache
+            result = (hashes, matrix)
+            if not isinstance(self._embedding_cache, dict):
+                self._embedding_cache = {}
+            self._embedding_cache[cache_key] = result
+            return result
         except ImportError:
             rows = self._conn.execute(
-                "SELECT question_hash, embedding FROM semantic_cache"
+                """
+                SELECT question_hash, embedding FROM semantic_cache
+                WHERE intent = ? AND domain = ? AND index_version = ?
+                  AND policy_version = ? AND document_type = ?
+                """,
+                (
+                    scope["intent"],
+                    scope["domain"],
+                    scope["index_version"],
+                    scope["policy_version"],
+                    scope["document_type"],
+                ),
             ).fetchall()
             hashes = [r["question_hash"] for r in rows]
             matrix = [_unpack_embedding(r["embedding"]) for r in rows]
             return hashes, matrix
+
+    @staticmethod
+    def _scope(
+        *,
+        intent: str = "",
+        domain: str = "",
+        index_version: str = "",
+        policy_version: str = "",
+        document_type: str = "",
+    ) -> Dict[str, str]:
+        return {
+            "intent": _normalize_scope_value(intent),
+            "domain": str(domain or "").strip(),
+            "index_version": _normalize_scope_value(index_version),
+            "policy_version": _normalize_scope_value(policy_version),
+            "document_type": _normalize_scope_value(document_type),
+        }
+
+    @staticmethod
+    def _row_matches_scope(row, scope: Dict[str, str]) -> bool:
+        keys = set(row.keys())
+        for key, expected in scope.items():
+            actual = str(row[key] if key in keys else "").strip()
+            if key != "domain":
+                actual = actual.lower()
+            if actual != expected:
+                return False
+        return True
 
     def close(self):
         with self._lock:

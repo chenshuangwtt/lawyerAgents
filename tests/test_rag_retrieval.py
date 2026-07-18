@@ -175,6 +175,43 @@ def test_rerank_documents_can_disable_source_coverage():
     assert scores == [0.99, 0.98]
 
 
+def test_rerank_documents_lightly_prefers_authoritative_law_when_scores_are_close():
+    legacy_case = _doc(
+        "历史案例：劳动争议处理摘要",
+        source="CaseMatch历史案例",
+        file_path="data/CaseMatch/cases.sqlite3",
+    )
+    law_doc = _doc(
+        "劳动合同法第三十条 用人单位应当按照劳动合同约定和国家规定支付劳动报酬。",
+        source="中华人民共和国劳动合同法",
+        file_path="data/laws/中华人民共和国劳动合同法.docx",
+    )
+
+    class FakeReranker:
+        def rerank(self, _query, documents, top_k):
+            assert documents == [legacy_case, law_doc]
+            assert top_k == 2
+            return [(legacy_case, 1.0), (law_doc, 0.97)]
+
+    reranked, scores = rerank_documents(
+        "拖欠工资怎么办",
+        [legacy_case, law_doc],
+        {
+            "reranker": FakeReranker(),
+            "rerank_final_k": 1,
+            "source_coverage_candidate_k": 2,
+            "enable_source_coverage_selection": False,
+            "enable_authority_weighting": True,
+            "authority_boost_factor": 0.08,
+        },
+    )
+
+    assert reranked == [law_doc]
+    assert scores == [0.97]
+    assert law_doc.metadata["source_level"] == "law"
+    assert legacy_case.metadata["source_level"] == "legacy_case"
+
+
 def test_expand_retrieved_context_includes_adjacent_and_referenced_articles():
     doc1 = _doc("示例法第一条", source="示例法", article_numbers_int="1")
     doc2 = _doc(

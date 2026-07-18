@@ -37,6 +37,38 @@ def test_verifier_matches_bare_law_name_with_arabic_article_number():
     assert result["matched_citations"][0]["citation"] == "劳动合同法第82条"
 
 
+def test_verifier_matches_bracket_law_with_chinese_article_number():
+    sources = normalize_sources([{
+        "law_name": "中华人民共和国劳动合同法",
+        "article_no": "第三十条",
+        "source_type": "statute",
+        "text": "第三十条 用人单位应当按照劳动合同约定和国家规定，向劳动者及时足额支付劳动报酬。",
+    }])
+    answer = "拖欠工资可引用《中华人民共和国劳动合同法》第三十条。"
+
+    result = CitationVerifier().verify(answer, sources)
+
+    assert result["verified"] is True
+    assert result["unsupported_citations"] == []
+    assert result["matched_citations"][0]["article_no"] == "第三十条"
+
+
+def test_verifier_rejects_article_not_present_in_sources():
+    sources = normalize_sources([{
+        "law_name": "中华人民共和国劳动合同法",
+        "article_no": "第三十条",
+        "source_type": "statute",
+        "text": "第三十条 用人单位应当及时足额支付劳动报酬。",
+    }])
+    answer = "未签书面劳动合同通常会涉及《劳动合同法》第八十二条。"
+
+    result = CitationVerifier().verify(answer, sources)
+
+    assert result["verified"] is False
+    assert result["matched_citations"] == []
+    assert result["unsupported_citations"] == ["劳动合同法第八十二条"]
+
+
 def test_verifier_matches_according_to_civil_code_citation():
     sources = normalize_sources([{
         "law_name": "中华人民共和国民法典",

@@ -13,6 +13,9 @@ def test_normalize_legacy_string_source():
     assert sources[0]["law_name"] == "中华人民共和国民法典"
     assert sources[0]["article_no"] == "第四条"
     assert sources[0]["source"] == "中华人民共和国民法典 第四条"
+    assert sources[0]["source_level"] == "law"
+    assert sources[0]["authority_weight"] == 1.0
+    assert sources[0]["authority_label"] == "法律法规"
     assert SourceItem(**sources[0]).law_name == "中华人民共和国民法典"
 
 
@@ -42,6 +45,7 @@ def test_normalize_splits_multi_article_legacy_source_and_fills_text():
     ]
     assert sources[0]["text"] == doc.page_content
     assert sources[0]["file_path"] == "data/民法典.txt"
+    assert sources[0]["source_level"] == "law"
     assert sources[0]["confidence"] == "high"
 
 
@@ -54,3 +58,54 @@ def test_normalize_interpretation_source_type_from_title():
     assert sources[0]["source_type"] == "interpretation"
     assert sources[0]["article_no"] == "第一条"
     assert sources[0]["text"] == "第一条 示例"
+
+
+def test_normalize_dict_source_with_canonical_fields():
+    sources = normalize_sources([{
+        "law_name": "中华人民共和国劳动合同法",
+        "article_no": "第八十二条",
+        "source_type": "statute",
+        "text": "第八十二条 用人单位超过一个月不满一年未订立书面劳动合同的，应当支付二倍工资。",
+        "file_path": "data/labor_contract_law.txt",
+    }])
+
+    item = sources[0]
+    assert item["law_name"] == "中华人民共和国劳动合同法"
+    assert item["article_no"] == "第八十二条"
+    assert item["source_type"] == "statute"
+    assert item["source_level"] == "law"
+    assert item["authority_weight"] == 1.0
+    assert item["text"].startswith("第八十二条")
+    assert item["file_path"] == "data/labor_contract_law.txt"
+    assert SourceItem(**item).article_no == "第八十二条"
+
+
+def test_normalize_missing_fields_uses_unknown_source_without_crashing():
+    sources = normalize_sources([{"content": "只有正文，没有来源元数据。"}])
+
+    assert len(sources) == 1
+    item = sources[0]
+    assert item["law_name"] == "未知来源"
+    assert item["source_type"] == "unknown"
+    assert item["source_level"] == "unknown"
+    assert item["authority_weight"] == 0.5
+    assert item["article_no"] == ""
+    assert item["content"] == "只有正文，没有来源元数据。"
+    assert item["text"] == "只有正文，没有来源元数据。"
+
+
+def test_normalize_legacy_cache_source_without_authority_fields():
+    sources = normalize_sources([{
+        "source": "CaseMatch历史案例",
+        "content": "历史案例摘要",
+        "metadata": {
+            "file_path": "data/CaseMatch/cases.sqlite3",
+            "source": "CaseMatch历史案例",
+        },
+    }])
+
+    item = sources[0]
+    assert item["source_level"] == "legacy_case"
+    assert item["source_type"] == "case"
+    assert item["authority_weight"] == 0.45
+    assert SourceItem(**item).authority_label == "历史案例"

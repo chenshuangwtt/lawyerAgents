@@ -11,6 +11,7 @@ from langchain_core.documents import Document
 from app.article_index import get_adjacent_articles
 from app.article_utils import ARTICLE_PATTERN, chinese_num_to_int
 from app.hybrid_retriever import reciprocal_rank_fusion, reciprocal_rank_fusion_with_trace
+from app.source_authority import authority_adjusted_score, enrich_authority_metadata
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,38 @@ def _doc_identity(doc: Document) -> str:
         str(doc.metadata.get("article", "")),
         doc.page_content[:200],
     ])
+
+
+def _enrich_doc_authority(doc: Document) -> Document:
+    metadata = enrich_authority_metadata(
+        getattr(doc, "metadata", {}) or {},
+        file_path=str((getattr(doc, "metadata", {}) or {}).get("file_path", "")),
+        source=str((getattr(doc, "metadata", {}) or {}).get("source", "")),
+    )
+    doc.metadata.update(metadata)
+    return doc
+
+
+def _enrich_scored_docs(scored_docs: List[Tuple[Document, float]]) -> List[Tuple[Document, float]]:
+    return [(_enrich_doc_authority(doc), score) for doc, score in scored_docs]
+
+
+def _apply_authority_ordering(
+    scored_docs: List[Tuple[Document, float]],
+    components: Dict,
+) -> List[Tuple[Document, float]]:
+    scored_docs = _enrich_scored_docs(scored_docs)
+    if not components.get("enable_authority_weighting", True):
+        return scored_docs
+    boost_factor = float(components.get("authority_boost_factor", 0.08))
+    decorated = []
+    for index, (doc, score) in enumerate(scored_docs):
+        adjusted = authority_adjusted_score(score, doc.metadata.get("source_level", "unknown"), boost_factor)
+        doc.metadata["rerank_score"] = score
+        doc.metadata["authority_adjusted_score"] = adjusted
+        decorated.append((adjusted, -index, doc, score))
+    decorated.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [(doc, score) for _adjusted, _neg_index, doc, score in decorated]
 
 
 def _law_aliases(law_name: str) -> list[str]:
@@ -416,6 +449,7 @@ def rerank_documents(
 
     if simple_mode:
         scored = [(doc, 0.0) for doc in merged_docs[:coverage_candidate_k]]
+        scored = _enrich_scored_docs(scored)
         if enable_source_coverage:
             reranked_docs, scores = select_boosted_source_coverage_docs(
                 scored,
@@ -432,6 +466,7 @@ def rerank_documents(
 
     if reranker and merged_docs:
         scored_reranked = reranker.rerank(query, merged_docs, top_k=coverage_candidate_k)
+        scored_reranked = _apply_authority_ordering(scored_reranked, components)
         if enable_source_coverage:
             reranked_docs, reranked_scores = select_boosted_source_coverage_docs(
                 scored_reranked,
@@ -448,6 +483,7 @@ def rerank_documents(
         return reranked_docs, reranked_scores
 
     scored = [(doc, 0.0) for doc in merged_docs[:coverage_candidate_k]]
+    scored = _enrich_scored_docs(scored)
     if enable_source_coverage:
         return select_boosted_source_coverage_docs(
             scored,
