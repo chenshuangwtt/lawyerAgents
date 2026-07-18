@@ -8,19 +8,26 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.schemas.labor_arbitration import LaborArbitrationDraftInput, LaborArbitrationDraftResult, MissingField
+from app.schemas.labor_arbitration import (
+    FieldSlot,
+    LaborArbitrationDraftInput,
+    LaborArbitrationDraftResult,
+    MissingField,
+)
 from app.source_item import SourceItem, normalize_sources
 
 
 DOC_TYPE = "labor_arbitration_application"
 DOC_TYPE_ALIASES = {"labor_arbitration", DOC_TYPE}
 TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "labor_arbitration.md.tpl"
+PLACEHOLDER = "【待补充】"
 
 FIELD_LABELS = {
     "applicant_name": "申请人姓名",
     "applicant_gender": "申请人性别",
     "applicant_birth_date": "申请人出生日期",
     "applicant_phone": "申请人联系方式",
+    "applicant_id": "申请人身份证号",
     "applicant_id_number": "申请人身份证号",
     "applicant_address": "申请人住所",
     "applicant_mailing_address": "申请人通讯地址",
@@ -69,6 +76,7 @@ LABOR_FIELDS = {
     "applicant_gender": "",
     "applicant_birth_date": "",
     "applicant_phone": "",
+    "applicant_id": "",
     "applicant_id_number": "",
     "applicant_address": "",
     "applicant_mailing_address": "",
@@ -112,28 +120,59 @@ LABOR_FIELDS = {
     "other_facts": "",
 }
 
-REQUIRED_FIELDS = [
+DOCUMENT_SCHEMA_FIELDS = [
     "applicant_name",
+    "applicant_id",
+    "applicant_phone",
     "respondent_name",
+    "respondent_address",
     "employment_start_date",
     "employment_end_date",
     "monthly_salary",
+    "arbitration_claims",
+    "facts_and_reasons",
+    "evidence_list",
 ]
+
+BLOCKING_REQUIRED_FIELDS = [
+    "applicant_name",
+    "applicant_phone",
+    "respondent_name",
+    "respondent_address",
+    "employment_start_date",
+    "monthly_salary",
+    "arbitration_claims",
+    "facts_and_reasons",
+]
+
+REQUIRED_FIELDS = BLOCKING_REQUIRED_FIELDS
 
 CLARIFICATION_QUESTIONS = {
     "applicant_name": "请补充申请人姓名。",
+    "applicant_id": "请补充申请人身份证号；如暂时不便提供，可后续在文书中补填。",
+    "applicant_phone": "请补充申请人联系电话。",
     "respondent_name": "请补充被申请人单位名称。",
+    "respondent_address": "请补充被申请人单位地址或主要办公地址。",
     "employment_start_date": "请补充入职时间，最好精确到年月日。",
     "employment_end_date": "请补充离职、辞退或劳动关系解除时间。",
     "monthly_salary": "请补充月工资或离职前十二个月平均工资标准。",
+    "arbitration_claims": "请补充你希望仲裁支持的请求，例如支付拖欠工资、二倍工资差额或违法解除赔偿金。",
+    "facts_and_reasons": "请补充与仲裁请求相关的主要事实经过。",
+    "evidence_list": "请补充已有证据，例如工资流水、考勤记录、聊天记录、辞退通知等。",
 }
 
 MISSING_FIELD_REASONS = {
     "applicant_name": "仲裁申请书必须明确申请人主体，系统不能代填姓名。",
+    "applicant_id": "身份证号用于明确申请人身份，系统不能编造；可先以占位符保留。",
+    "applicant_phone": "联系电话用于仲裁机构送达和联系，系统不能编造。",
     "respondent_name": "仲裁申请书必须明确被申请人单位，系统不能猜测公司名称。",
+    "respondent_address": "被申请人地址用于确定送达和管辖，系统不能猜测。",
     "employment_start_date": "入职时间会影响劳动关系期间、二倍工资和赔偿金计算。",
     "employment_end_date": "离职或解除时间会影响劳动关系期间、赔偿金和仲裁时效判断。",
     "monthly_salary": "工资标准是工资、二倍工资和赔偿金计算的基础，系统不能编造金额。",
+    "arbitration_claims": "仲裁请求决定文书的核心诉请，不能由系统脱离事实编造。",
+    "facts_and_reasons": "事实与理由必须基于用户提供内容或案情状态，不能编造。",
+    "evidence_list": "证据目录应基于用户已有或可准备材料，不能虚构已存在证据。",
 }
 
 
@@ -241,6 +280,7 @@ def empty_fields() -> dict[str, Any]:
 
 def _sync_alias_fields(fields: dict[str, Any]) -> None:
     alias_pairs = [
+        ("applicant_id", "applicant_id_number"),
         ("respondent_legal_rep", "legal_representative"),
         ("respondent_contact_person", "contact_person_and_title"),
         ("job_position", "position"),
@@ -352,6 +392,7 @@ def extract_labor_arbitration_fields(text: str, existing: dict | None = None) ->
 
     id_number = _first_match([r"([1-9]\d{5}(?:18|19|20)\d{2}\d{2}\d{2}\d{3}[\dXx])"], text)
     if id_number:
+        fields["applicant_id"] = id_number
         fields["applicant_id_number"] = id_number
         fields["applicant_birth_date"] = fields.get("applicant_birth_date") or f"{id_number[6:10]}年{int(id_number[10:12])}月{int(id_number[12:14])}日"
         fields["applicant_gender"] = fields.get("applicant_gender") or ("男" if int(id_number[16]) % 2 else "女")
@@ -489,7 +530,7 @@ def extract_labor_arbitration_fields(text: str, existing: dict | None = None) ->
     if commission:
         fields["arbitration_commission"] = commission
     elif not fields.get("arbitration_commission"):
-        fields["arbitration_commission"] = "待补充劳动人事争议仲裁委员会"
+        fields["arbitration_commission"] = f"{PLACEHOLDER}劳动人事争议仲裁委员会"
 
     facts = []
     if fields["employment_start_date"]:
@@ -598,20 +639,80 @@ def infer_claim_calculation_formula(fields: dict[str, Any], text: str) -> list[s
 
 def infer_evidence_list(fields: dict[str, Any], text: str) -> list[str]:
     evidence = [
-        "工资流水、银行转账记录或工资条，证明工资标准和工资支付情况。",
-        "工作证、考勤记录、聊天记录、工牌、入职材料等，证明劳动关系和工作期间。",
+        "如已有，提交工资流水、银行转账记录或工资条，用于证明工资标准和工资支付情况。",
+        "如已有，提交工作证、考勤记录、聊天记录、工牌、入职材料等，用于证明劳动关系和工作期间。",
     ]
     if fields.get("has_written_contract") == "否":
-        evidence.append("未签订书面劳动合同的相关说明及入职、工作沟通记录。")
+        evidence.append("如已有，提交入职、工作安排或沟通记录，用于说明未签订书面劳动合同及实际用工情况。")
     if re.search(r"辞退|不用来了|解雇|开除|解除劳动关系", text):
-        evidence.append("辞退通知、聊天记录、录音或其他解除劳动关系证据。")
+        evidence.append("如已有，提交辞退通知、聊天记录、录音或其他解除劳动关系证据。")
     if fields.get("has_social_insurance") == "否":
-        evidence.append("社保缴费记录或社保查询截图，证明社保缴纳情况。")
+        evidence.append("如已有，提交社保缴费记录或社保查询截图，用于证明社保缴纳情况。")
     return evidence
 
 
+def _has_value(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(str(item).strip() and str(item).strip() != PLACEHOLDER for item in value)
+    return bool(str(value or "").strip() and str(value or "").strip() != PLACEHOLDER)
+
+
+def _field_status(fields: dict[str, Any], key: str) -> str:
+    value = fields.get(key)
+    if key == "applicant_id":
+        value = fields.get("applicant_id") or fields.get("applicant_id_number")
+    if not _has_value(value):
+        return "missing"
+    if isinstance(value, list):
+        joined = "\n".join(str(item) for item in value)
+    else:
+        joined = str(value)
+    if PLACEHOLDER in joined or "待补充" in joined or "需补充" in joined:
+        return "partial"
+    if "具体" in joined and ("待" in joined or "以仲裁庭" in joined):
+        return "uncertain"
+    return "known"
+
+
+def build_field_status(fields: dict[str, Any]) -> dict[str, str]:
+    return {key: _field_status(fields, key) for key in DOCUMENT_SCHEMA_FIELDS}
+
+
+def build_field_slots(fields: dict[str, Any]) -> list[FieldSlot]:
+    status_map = build_field_status(fields)
+    slots: list[FieldSlot] = []
+    for key in DOCUMENT_SCHEMA_FIELDS:
+        value = fields.get(key)
+        if key == "applicant_id":
+            value = fields.get("applicant_id") or fields.get("applicant_id_number")
+        slots.append(FieldSlot(
+            field_name=key,
+            display_name=FIELD_LABELS.get(key, key),
+            value=value or ([] if key in {"arbitration_claims", "evidence_list"} else ""),
+            status=status_map[key],
+            required=True,
+            blocking=key in BLOCKING_REQUIRED_FIELDS,
+            question=CLARIFICATION_QUESTIONS.get(key, f"请补充{FIELD_LABELS.get(key, key)}。"),
+        ))
+    return slots
+
+
 def missing_required_fields(fields: dict[str, Any]) -> list[str]:
-    return [key for key in REQUIRED_FIELDS if not fields.get(key)]
+    status_map = build_field_status(fields)
+    missing: list[str] = []
+    for key in REQUIRED_FIELDS:
+        status = status_map.get(key)
+        if status == "missing":
+            missing.append(key)
+    return missing
+
+
+def advisory_missing_fields(fields: dict[str, Any]) -> list[str]:
+    status_map = build_field_status(fields)
+    return [
+        key for key in DOCUMENT_SCHEMA_FIELDS
+        if key not in BLOCKING_REQUIRED_FIELDS and status_map.get(key) in {"missing", "partial", "uncertain"}
+    ]
 
 
 def build_missing_fields(missing: list[str]) -> list[MissingField]:
@@ -622,6 +723,8 @@ def build_missing_fields(missing: list[str]) -> list[MissingField]:
             reason=MISSING_FIELD_REASONS.get(key, f"生成文书前需要补充{FIELD_LABELS.get(key, key)}。"),
             question=CLARIFICATION_QUESTIONS.get(key, f"请补充{FIELD_LABELS.get(key, key)}。"),
             required=True,
+            status="missing",
+            blocking=key in BLOCKING_REQUIRED_FIELDS,
         )
         for key in missing
     ]
@@ -629,30 +732,32 @@ def build_missing_fields(missing: list[str]) -> list[MissingField]:
 
 def missing_fields_message(missing: list[str]) -> str:
     lines = ["还需要补充以下信息后才能生成劳动仲裁申请书：", ""]
-    for i, item in enumerate(build_missing_fields(missing), 1):
+    for i, item in enumerate(build_missing_fields(missing[:3]), 1):
         lines.append(f"{i}. {item.display_name}：{item.question}")
+    if len(missing) > 3:
+        lines.append(f"另有 {len(missing) - 3} 项信息也建议后续补充。")
     lines.extend(["", "请补充后，我将继续生成文书。"])
     return "\n".join(lines)
 
 
 def _numbered(items: list[str]) -> str:
     if not items:
-        return "1. 待补充"
+        return f"1. {PLACEHOLDER}"
     return "\n".join(f"{i}. {item}" for i, item in enumerate(items, 1))
 
 
 def _numbered_table_value(items: list[str]) -> str:
     if not items:
-        return "待补充"
+        return PLACEHOLDER
     return "<br>".join(f"{i}. {_escape_table(item)}" for i, item in enumerate(items, 1))
 
 
 def _value(fields: dict[str, Any], key: str) -> str:
-    return str(fields.get(key) or "待补充")
+    return str(fields.get(key) or PLACEHOLDER)
 
 
 def _escape_table(value: Any) -> str:
-    text = str(value or "待补充")
+    text = str(value or PLACEHOLDER)
     return text.replace("|", "\\|").replace("\n", "<br>")
 
 
@@ -673,10 +778,10 @@ def _rows(items: list[tuple[str, Any]]) -> str:
 
 
 def _claim_rows(claims: list[str]) -> str:
-    items = claims or ["待补充"]
+    items = claims or [PLACEHOLDER]
     rows = []
     for index in range(3):
-        value = items[index] if index < len(items) else "待补充"
+        value = items[index] if index < len(items) else PLACEHOLDER
         rows.append(_row(f"请求 {index + 1}", value))
     return "\n".join(rows)
 
@@ -715,10 +820,10 @@ def infer_legal_basis(fields: dict[str, Any], text: str = "") -> list[SourceItem
 
 def _legal_basis_block(items: list[SourceItem]) -> str:
     if not items:
-        return "1. 待补充"
+        return f"1. {PLACEHOLDER}"
     lines = []
     for index, item in enumerate(items, 1):
-        title = item.title or f"{item.law_name}{item.article_no}".strip() or "待补充"
+        title = item.title or f"{item.law_name}{item.article_no}".strip() or PLACEHOLDER
         text = f"：{item.text}" if item.text else ""
         lines.append(f"{index}. {title}{text}")
     return "\n".join(lines)
@@ -785,7 +890,7 @@ def render_labor_arbitration_application(fields: dict[str, Any]) -> str:
         "evidence_block": _numbered(fields.get("evidence_list") or []),
         "legal_basis_block": _legal_basis_block(source_items),
         "applicant_name": _value(fields, "applicant_name"),
-        "submit_date": datetime.now().strftime("%Y年%m月%d日"),
+        "submit_date": f"{PLACEHOLDER}年{PLACEHOLDER}月{PLACEHOLDER}日",
     }
     return _render_template(context)
 
@@ -793,7 +898,7 @@ def render_labor_arbitration_application(fields: dict[str, Any]) -> str:
 def clarification_questions_for_missing(missing: list[str]) -> list[str]:
     return [
         CLARIFICATION_QUESTIONS.get(key, f"请补充{FIELD_LABELS.get(key, key)}。")
-        for key in missing
+        for key in missing[:3]
     ]
 
 
@@ -820,11 +925,15 @@ def _build_draft_from_fields(
     missing = missing_required_fields(fields)
     status = "need_more_info" if missing else "ready"
     document = "" if missing else render_labor_arbitration_application(fields)
+    field_status = build_field_status(fields)
+    field_slots = build_field_slots(fields)
     return LaborArbitrationDraftResult(
         status=status,
         applicant_name=str(fields.get("applicant_name") or ""),
+        applicant_id=str(fields.get("applicant_id") or fields.get("applicant_id_number") or ""),
         applicant_contact=str(fields.get("applicant_phone") or ""),
         respondent_name=str(fields.get("respondent_name") or ""),
+        respondent_address=str(fields.get("respondent_address") or ""),
         work_start_date=str(fields.get("employment_start_date") or ""),
         work_end_date=str(fields.get("employment_end_date") or ""),
         monthly_salary=str(fields.get("monthly_salary") or ""),
@@ -832,10 +941,13 @@ def _build_draft_from_fields(
         facts_and_reasons=str(fields.get("facts_and_reasons") or ""),
         evidence_list=list(fields.get("evidence_list") or []),
         legal_basis=source_items,
+        field_status=field_status,
+        field_slots=field_slots,
         missing_fields=build_missing_fields(missing),
         clarification_questions=clarification_questions_for_missing(missing),
         draft_markdown=document,
         document_markdown=document,
+        can_export=status == "ready",
     )
 
 
@@ -861,12 +973,16 @@ def build_labor_document_result(text: str, existing_fields: dict | None = None) 
     draft = _build_draft_from_fields(fields, text)
     draft_payload = draft.model_dump()
     missing = missing_required_fields(fields)
+    advisory_missing = advisory_missing_fields(fields)
+    field_status = build_field_status(fields)
+    field_slots = [slot.model_dump() for slot in build_field_slots(fields)]
     if missing:
         structured_missing = [item.model_dump() for item in draft.missing_fields]
         missing_display_names = [FIELD_LABELS.get(key, key) for key in missing]
         return {
             "type": "document_generation_result",
             "doc_type": DOC_TYPE,
+            "document_type": DOC_TYPE,
             "status": "need_more_info",
             "legacy_status": "missing_fields",
             "missing_fields": missing,
@@ -875,13 +991,18 @@ def build_labor_document_result(text: str, existing_fields: dict | None = None) 
             "clarification_questions": draft.clarification_questions,
             "extracted_fields": fields,
             "form_fields": fields,
+            "field_status": field_status,
+            "field_slots": field_slots,
+            "advisory_missing_fields": advisory_missing,
             "draft": draft_payload,
             "display_modes": ["form", "preview"],
             "message": missing_fields_message(missing),
+            "can_export": False,
         }
     return {
         "type": "document_generation_result",
         "doc_type": DOC_TYPE,
+        "document_type": DOC_TYPE,
         "status": "ready",
         "legacy_status": "success",
         "missing_fields": [],
@@ -890,9 +1011,13 @@ def build_labor_document_result(text: str, existing_fields: dict | None = None) 
         "clarification_questions": [],
         "extracted_fields": fields,
         "form_fields": fields,
+        "field_status": field_status,
+        "field_slots": field_slots,
+        "advisory_missing_fields": advisory_missing,
         "draft": draft_payload,
         "display_modes": ["form", "preview"],
         "draft_markdown": draft.draft_markdown,
         "document_markdown": draft.document_markdown,
+        "can_export": True,
         "warnings": ["本文书仅供参考，提交前建议咨询专业律师。"],
     }

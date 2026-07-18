@@ -4,6 +4,7 @@ from app.schemas.case_analysis import (
     CaseAnalysisResult,
     ClaimItem,
     build_case_analysis_result,
+    extract_case_analysis_json_with_warnings,
     render_case_analysis_markdown,
 )
 
@@ -132,3 +133,64 @@ def test_build_case_analysis_result_prefers_structured_labor_claims_json():
     assert claim.support_level == "medium"
     assert claim.required_evidence
     assert claim.risk_notes
+
+
+def test_build_case_analysis_result_supports_card_schema_json():
+    report = _sample_report() + """
+
+```json
+{
+  "case_summary": "员工被违法解除，主张赔偿金。",
+  "case_type": "劳动争议",
+  "risk_level": "medium",
+  "legal_relationships": ["劳动关系", "解除劳动合同争议"],
+  "claims": [
+    {
+      "claim": "违法解除赔偿金",
+      "domain": "劳动",
+      "basis": [
+        {
+          "law_name": "中华人民共和国劳动合同法",
+          "article_no": "第八十七条",
+          "summary": "违法解除或终止劳动合同应支付赔偿金。"
+        }
+      ],
+      "supporting_facts": ["公司口头辞退"],
+      "missing_facts": ["解除通知", "工资标准"],
+      "risks": ["解除原因和程序仍需证明"],
+      "suggested_evidence": ["劳动合同", "工资流水", "辞退通知或聊天记录"]
+    }
+  ],
+  "evidence_checklist": ["劳动合同", "工资流水"],
+  "next_actions": ["整理证据后申请劳动仲裁"],
+  "missing_information": ["解除时间", "月工资"],
+  "document_suggestions": ["劳动仲裁申请书"]
+}
+```
+"""
+
+    result = build_case_analysis_result(report=report)
+
+    assert result.case_type == "劳动争议"
+    assert result.risk_level == "medium"
+    assert result.claims[0].claim == "违法解除赔偿金"
+    assert result.claims[0].basis[0].article_no == "第八十七条"
+    assert result.claims[0].missing_facts == ["解除通知", "工资标准"]
+    assert result.document_suggestions == ["劳动仲裁申请书"]
+    assert result.possible_claims[0].claim_name == "违法解除赔偿金"
+
+
+def test_extract_case_analysis_json_reports_warning_without_crashing():
+    data, warnings = extract_case_analysis_json_with_warnings("""
+### 🧾 案情摘要
+
+报告仍然应返回。
+
+```json
+{"case_summary": "缺少右花括号"
+```
+""")
+
+    assert data == {}
+    assert warnings
+    assert warnings[0].startswith("analysis_json_parse_failed")

@@ -17,7 +17,7 @@ import os
 import hmac
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Header, Request
@@ -70,6 +70,11 @@ class ChatResponse(BaseModel):
     domain: str = Field(default="综合", description="问题所属法律领域")
     risk_warning: str = Field(default="", description="风险提示")
     case_results: list = Field(default=[], description="相似案例列表")
+    analysis_result: dict[str, Any] | None = Field(default=None, description="结构化案情分析结果")
+    analysis_markdown: str = Field(default="", description="案情分析 Markdown 报告")
+    case_analysis_id: str = Field(default="", description="案情分析结果 ID")
+    case_state: dict[str, Any] | None = Field(default=None, description="案情状态")
+    warnings: list[str] = Field(default=[], description="非致命处理警告")
 
 
 class HealthResponse(BaseModel):
@@ -204,6 +209,66 @@ def _require_admin(request: Request, x_api_key: str) -> None:
         raise HTTPException(status_code=403, detail="无效的 API Key")
 
 
+def _cache_domain_from_classify(classify_result: dict | None) -> str:
+    if not isinstance(classify_result, dict):
+        return "综合"
+    domain = str(classify_result.get("domain") or "").strip()
+    if domain:
+        return domain
+    domains = classify_result.get("domains")
+    if isinstance(domains, list) and domains:
+        return str(domains[0] or "").strip() or "综合"
+    return "综合"
+
+
+def _semantic_cache_scope(
+    *,
+    intent: str,
+    domain: str,
+    components: dict | None = None,
+    document_type: str = "",
+) -> dict[str, str]:
+    from app.config import settings
+
+    components = components or {}
+    return {
+        "intent": str(intent or "qa"),
+        "domain": str(domain or "综合"),
+        "index_version": str(components.get("index_version") or settings.index_version),
+        "policy_version": str(components.get("policy_version") or settings.policy_version),
+        "document_type": str(document_type or ""),
+    }
+
+
+def _semantic_cache_enabled(intent: str, components: dict | None = None) -> bool:
+    from app.config import settings
+
+    components = components or {}
+    normalized = str(intent or "qa").lower()
+    if normalized == "analysis":
+        return bool(components.get("enable_analysis_cache", settings.enable_analysis_cache))
+    if normalized == "document":
+        return bool(components.get("enable_document_cache", settings.enable_document_cache))
+    if normalized in {"qa", "statute"}:
+        return bool(components.get("enable_qa_cache", settings.enable_qa_cache))
+    return False
+
+
+def _semantic_cache_exact_only(intent: str) -> bool:
+    return str(intent or "qa").lower() in {"analysis", "document"}
+
+
+def _intent_from_done_event(event: dict[str, Any]) -> str:
+    explicit = str(event.get("intent") or "").strip()
+    if explicit:
+        return explicit
+    if event.get("document_result") or event.get("document_markdown") or event.get("document_type") or event.get("doc_type"):
+        return "document"
+    if event.get("analysis_result") or event.get("analysis_markdown") or event.get("case_analysis_id"):
+        return "analysis"
+    return "qa"
+
+
 def _schedule_semantic_cache_store(
     question: str,
     answer_text: str,
@@ -211,11 +276,21 @@ def _schedule_semantic_cache_store(
     domain: str,
     case_results: list,
     cache=None,
+    *,
+    intent: str = "qa",
+    components: dict | None = None,
+    document_type: str = "",
 ) -> None:
     """后台写入语义缓存，避免阻塞 SSE done 事件。"""
     cache = semantic_cache if cache is None else cache
-    if not cache:
+    if not cache or not _semantic_cache_enabled(intent, components):
         return
+    scope = _semantic_cache_scope(
+        intent=intent,
+        domain=domain,
+        components=components,
+        document_type=document_type,
+    )
 
     async def _store():
         try:
@@ -226,6 +301,10 @@ def _schedule_semantic_cache_store(
                 sources,
                 domain,
                 case_results,
+                intent=scope["intent"],
+                index_version=scope["index_version"],
+                policy_version=scope["policy_version"],
+                document_type=scope["document_type"],
             )
         except asyncio.CancelledError:
             raise
@@ -337,11 +416,189 @@ async def chat(request: ChatRequest):
             detail="RAG 链尚未初始化，请等待服务就绪后重试",
         )
 
+    classify_result = None
+    intent = "qa"
+    if ctx.analysis_graph and components.get("enable_case_analysis", True):
+        try:
+            from app.classifier import classify_question_multi
+            classify_result = classify_question_multi(
+                ctx.llm,
+                request.question,
+                max_domains=components.get("multi_domain_max_domains", 3),
+            )
+            intent = classify_result.get("intent", "qa")
+        except Exception as e:
+            logger.debug("[意图分类] 失败，回退 qa: %s", e)
+            intent = "qa"
+    cache_domain = _cache_domain_from_classify(classify_result)
+
+    if intent == "analysis" and ctx.analysis_graph:
+        try:
+            from app.analysis_graph import run_analysis
+            from app.case_analysis_store import save_case_analysis
+            from app.case_state_builder import build_case_state_enrichment
+            from app.labor_case_guard import is_labor_case_context
+
+            if ctx.semantic_cache and _semantic_cache_enabled("analysis", components):
+                cache_scope = _semantic_cache_scope(
+                    intent="analysis",
+                    domain=cache_domain,
+                    components=components,
+                )
+                try:
+                    cached = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            ctx.semantic_cache.lookup,
+                            request.question,
+                            intent=cache_scope["intent"],
+                            domain=cache_scope["domain"],
+                            index_version=cache_scope["index_version"],
+                            policy_version=cache_scope["policy_version"],
+                            document_type=cache_scope["document_type"],
+                            exact_only=True,
+                        ),
+                        timeout=1.0,
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    if not isinstance(e, asyncio.TimeoutError):
+                        logger.warning("[语义缓存] 案情分析查找异常: %s", e)
+                    cached = None
+                if cached:
+                    record_id = save_record(
+                        session_id=request.session_id,
+                        question=request.question,
+                        answer=cached["answer"],
+                        sources=cached.get("sources", []),
+                        domain=cached.get("domain", "综合"),
+                    )
+                    return ChatResponse(
+                        id=record_id,
+                        session_id=request.session_id,
+                        answer=cached["answer"],
+                        sources=[SourceItem(**s) for s in normalize_sources(cached.get("sources", []))],
+                        domain=cached.get("domain", "综合"),
+                        risk_warning=RISK_WARNING,
+                        case_results=cached.get("case_results", []),
+                        analysis_result=cached.get("metadata", {}).get("analysis_result"),
+                        analysis_markdown=cached["answer"],
+                        warnings=[],
+                    )
+
+            analysis = await asyncio.to_thread(
+                run_analysis,
+                request.question,
+                request.session_id,
+            )
+            report = analysis.get("report", "")
+            structured_result = analysis.get("analysis_result", {})
+            claims = analysis.get("claims", [])
+            domain_history = list(dict.fromkeys(
+                c.get("domain", "") for c in claims if c.get("domain")
+            ))
+            primary_domain = claims[0].get("domain", "综合") if claims else "综合"
+            is_labor_case = is_labor_case_context({
+                "primary_domain": primary_domain,
+                "domains": domain_history,
+                "raw_input": request.question,
+                "analysis_result": report,
+                "analysis_structured": structured_result,
+                "claims": claims,
+            })
+            case_type = "劳动争议" if is_labor_case else (primary_domain or "综合")
+            domains = ["labor"] if is_labor_case else domain_history
+            analysis_record = save_case_analysis(
+                session_id=request.session_id,
+                raw_input=request.question,
+                analysis_result=report,
+                analysis_structured=structured_result,
+                case_type=case_type,
+                domains=domains,
+                primary_domain=primary_domain,
+            )
+            case_state_enrichment = build_case_state_enrichment(
+                is_labor_case=is_labor_case,
+                case_analysis_id=analysis_record["case_analysis_id"],
+                question=request.question,
+                report=report,
+                structured_result=structured_result,
+                claims=claims,
+            )
+            case_state = {
+                "parties": [],
+                "dispute_type": case_type,
+                "key_facts": [c.get("claim_text", "") for c in claims[:3]],
+                "stage": "案情分析",
+                "domain_history": domain_history,
+                "claims": [{"claim_text": c.get("claim_text", ""), "domain": c.get("domain", ""), "verdict": ""} for c in claims],
+                "case_analysis_id": analysis_record["case_analysis_id"],
+                "raw_input": request.question,
+                "analysis_result": structured_result,
+                "analysis_markdown": report,
+                "case_type": analysis_record["case_type"],
+                "domains": analysis_record["domains"],
+                "primary_domain": analysis_record["primary_domain"],
+                "created_at": analysis_record["created_at"],
+                **case_state_enrichment,
+            }
+            sources = analysis.get("sources", [])
+            record_id = save_record(
+                session_id=request.session_id,
+                question=request.question,
+                answer=report,
+                sources=sources,
+                domain=primary_domain,
+                case_state=json.dumps(case_state, ensure_ascii=False),
+            )
+            _schedule_semantic_cache_store(
+                request.question,
+                report,
+                sources,
+                primary_domain,
+                analysis.get("case_results", []),
+                cache=ctx.semantic_cache,
+                intent="analysis",
+                components=components,
+            )
+            return ChatResponse(
+                id=record_id,
+                session_id=request.session_id,
+                answer=report,
+                sources=[SourceItem(**s) for s in normalize_sources(sources)],
+                domain=primary_domain,
+                risk_warning=RISK_WARNING,
+                case_results=analysis.get("case_results", []),
+                analysis_result=structured_result,
+                analysis_markdown=report,
+                case_analysis_id=analysis_record["case_analysis_id"],
+                case_state=case_state,
+                warnings=analysis.get("warnings", []),
+            )
+        except Exception:
+            logger.exception("[Chat] 案情分析处理失败")
+            raise HTTPException(
+                status_code=500,
+                detail="案情分析处理失败，请稍后重试",
+            )
+
     # 先查缓存，命中则直接返回（避免启动不必要的 RAG 任务）
-    if ctx.semantic_cache:
+    if ctx.semantic_cache and _semantic_cache_enabled(intent, components):
+        cache_scope = _semantic_cache_scope(
+            intent=intent,
+            domain=cache_domain,
+            components=components,
+        )
         try:
             cached = await asyncio.wait_for(
-                asyncio.to_thread(ctx.semantic_cache.lookup, request.question),
+                asyncio.to_thread(
+                    ctx.semantic_cache.lookup,
+                    request.question,
+                    intent=cache_scope["intent"],
+                    domain=cache_scope["domain"],
+                    index_version=cache_scope["index_version"],
+                    policy_version=cache_scope["policy_version"],
+                    document_type=cache_scope["document_type"],
+                    exact_only=_semantic_cache_exact_only(intent),
+                ),
                 timeout=1.0,
             )
         except (asyncio.TimeoutError, Exception) as e:
@@ -383,16 +640,25 @@ async def chat(request: ChatRequest):
         result = await asyncio.to_thread(
             ask, ctx.rag_chain, ctx.retriever, ctx.llm,
             request.question, request.session_id,
-            ctx.rag_components,
+            {**components, "_classify_result": classify_result} if classify_result else components,
         )
 
         # 写入语义缓存
-        if ctx.semantic_cache:
+        if ctx.semantic_cache and _semantic_cache_enabled(intent, components):
             try:
+                store_scope = _semantic_cache_scope(
+                    intent=intent,
+                    domain=result.get("domain", cache_domain),
+                    components=components,
+                )
                 ctx.semantic_cache.store(
                     request.question, result["answer"],
                     result["sources"], result.get("domain", "综合"),
                     result.get("case_results", []),
+                    intent=store_scope["intent"],
+                    index_version=store_scope["index_version"],
+                    policy_version=store_scope["policy_version"],
+                    document_type=store_scope["document_type"],
                 )
             except Exception as e:
                 logger.warning("[语义缓存] 写入异常: %s", e)
@@ -414,6 +680,10 @@ async def chat(request: ChatRequest):
             domain=result.get("domain", "综合"),
             risk_warning=result.get("risk_warning", ""),
             case_results=result.get("case_results", []),
+            analysis_result=result.get("analysis_result"),
+            analysis_markdown=result.get("analysis_markdown", ""),
+            case_state=result.get("case_state") if isinstance(result.get("case_state"), dict) else None,
+            warnings=result.get("warnings", []),
         )
     except Exception as e:
         logger.exception("[Chat] 查询处理失败")
@@ -476,12 +746,27 @@ async def chat_stream(request: ChatRequest):
             except Exception as e:
                 logger.debug("[意图分类] 失败，回退 qa: %s", e)
                 intent = "qa"
+        cache_domain = _cache_domain_from_classify(classify_result)
 
         # 语义缓存命中 → 模拟流式回放
-        if ctx.semantic_cache and intent not in {"analysis", "document"}:
+        if ctx.semantic_cache and _semantic_cache_enabled(intent, components):
+            cache_scope = _semantic_cache_scope(
+                intent=intent,
+                domain=cache_domain,
+                components=components,
+            )
             try:
                 cached = await asyncio.wait_for(
-                    asyncio.to_thread(ctx.semantic_cache.lookup, request.question),
+                    asyncio.to_thread(
+                        ctx.semantic_cache.lookup,
+                        request.question,
+                        intent=cache_scope["intent"],
+                        domain=cache_scope["domain"],
+                        index_version=cache_scope["index_version"],
+                        policy_version=cache_scope["policy_version"],
+                        document_type=cache_scope["document_type"],
+                        exact_only=_semantic_cache_exact_only(intent),
+                    ),
                     timeout=1.0,
                 )
             except (asyncio.TimeoutError, Exception) as e:
@@ -507,7 +792,12 @@ async def chat_stream(request: ChatRequest):
                     sources=cached_sources,
                     domain=cached.get("domain", "综合"),
                 )
-                yield {"type": "meta", "domain": cached.get("domain", "综合"), "cached": True}
+                yield {
+                    "type": "meta",
+                    "intent": intent,
+                    "domain": cached.get("domain", "综合"),
+                    "cached": True,
+                }
                 yield {"type": "token", "content": cached["answer"]}
                 yield {
                     "type": "done",
@@ -567,6 +857,10 @@ async def chat_stream(request: ChatRequest):
             domain=event.get("domain", "综合"),
             case_state=cs,
         )
+        if event.get("cached"):
+            return record_id
+        event_intent = _intent_from_done_event(event)
+        document_type = str(event.get("document_type") or event.get("doc_type") or "")
         _schedule_semantic_cache_store(
             request.question,
             answer_text,
@@ -574,6 +868,9 @@ async def chat_stream(request: ChatRequest):
             event.get("domain", "综合"),
             event.get("case_results", []),
             cache=ctx.semantic_cache,
+            intent=event_intent,
+            components=components,
+            document_type=document_type,
         )
         return record_id
 
@@ -608,6 +905,8 @@ async def chat_stream(request: ChatRequest):
                             result.get("domain", "综合"),
                             result.get("case_results", []),
                             cache=ctx.semantic_cache,
+                            intent="qa",
+                            components=components,
                         )
                         yield {"type": "meta", "domain": result.get("domain", "综合")}
                         yield {"type": "token", "content": result["answer"]}
@@ -690,10 +989,12 @@ async def generate_document(request: DocumentRequest):
             result = {
                 "type": "document_generation_result",
                 "doc_type": document_type,
+                "document_type": document_type,
                 "status": "unsupported",
                 "missing_fields": [],
                 "message": message,
                 "warnings": [message],
+                "can_export": False,
             }
             yield {
                 "type": "meta",
@@ -708,7 +1009,11 @@ async def generate_document(request: DocumentRequest):
                 "risk_warning": RISK_WARNING,
                 "domain": case_state.get("primary_domain") or case_state.get("case_type") or "综合",
                 "doc_type": document_type,
+                "document_type": document_type,
                 "status": "unsupported",
+                "missing_fields": [],
+                "document_markdown": "",
+                "can_export": False,
                 "document_result": result,
                 "warnings": result["warnings"],
             }

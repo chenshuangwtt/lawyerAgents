@@ -60,7 +60,18 @@ def test_done_event_passes_timings_summary():
 def test_done_event_passes_structured_case_analysis_result():
     analysis_result = {
         "case_summary": "员工泄露客户名单",
+        "case_type": "商业秘密纠纷",
+        "risk_level": "medium",
         "legal_relationships": ["保密协议违约"],
+        "claims": [{
+            "claim": "赔偿损失",
+            "domain": "不正当竞争",
+            "basis": [],
+            "supporting_facts": [],
+            "missing_facts": ["损失金额"],
+            "risks": ["证据不足"],
+            "suggested_evidence": ["保密协议"],
+        }],
         "possible_claims": ["赔偿损失"],
         "evidence_checklist": ["保密协议"],
         "risks": ["证据不足"],
@@ -72,12 +83,14 @@ def test_done_event_passes_structured_case_analysis_result():
         "risk_warning": "",
         "analysis_result": analysis_result,
         "analysis_markdown": "### 🧾 案情摘要\n\n员工泄露客户名单",
+        "warnings": ["analysis_json_parse_failed: bad json"],
     }))
 
     data = _payload(chunk)
 
     assert data["analysis_result"] == analysis_result
     assert "员工泄露客户名单" in data["analysis_markdown"]
+    assert data["warnings"] == ["analysis_json_parse_failed: bad json"]
 
 
 def test_sse_stream_merges_sources_ready_into_done_for_save_and_frontend():

@@ -91,10 +91,13 @@ async def ask_document_stream(
             clarification_questions = result.get("clarification_questions", [])
             set_pending_document(session_id, {
                 "doc_type": LABOR_DOC_TYPE,
+                "document_type": LABOR_DOC_TYPE,
                 "case_state": case_state or {},
                 "extracted_fields": fields,
                 "missing_fields": missing_fields,
                 "missing_field_names": missing_field_names,
+                "field_status": result.get("field_status", {}),
+                "field_slots": result.get("field_slots", []),
             })
             answer = result.get("message", "")
             for line in answer.split("\n"):
@@ -107,12 +110,17 @@ async def ask_document_stream(
                 "risk_warning": RISK_WARNING,
                 "domain": "劳动",
                 "doc_type": LABOR_DOC_TYPE,
+                "document_type": LABOR_DOC_TYPE,
                 "status": "need_more_info",
                 "legacy_status": result.get("legacy_status", "missing_fields"),
                 "missing_fields": missing_fields,
                 "missing_field_names": missing_field_names,
                 "clarification_questions": clarification_questions,
                 "extracted_fields": fields,
+                "field_status": result.get("field_status", {}),
+                "field_slots": result.get("field_slots", []),
+                "document_markdown": "",
+                "can_export": False,
                 "document_result": result,
             }
             return
@@ -137,11 +145,16 @@ async def ask_document_stream(
             "risk_warning": RISK_WARNING,
             "domain": "劳动",
             "doc_type": LABOR_DOC_TYPE,
+            "document_type": LABOR_DOC_TYPE,
             "status": "ready",
             "legacy_status": result.get("legacy_status", "success"),
             "missing_fields": [],
             "missing_field_names": [],
             "extracted_fields": fields,
+            "field_status": result.get("field_status", {}),
+            "field_slots": result.get("field_slots", []),
+            "document_markdown": document,
+            "can_export": True,
             "document_result": result,
         }
 

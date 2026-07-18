@@ -12,6 +12,27 @@ from app.source_item import SourceItem, normalize_sources
 
 
 SupportLevel = Literal["strong", "medium", "weak", "unknown"]
+RiskLevel = Literal["low", "medium", "high", "unknown"]
+
+
+class ClaimBasis(BaseModel):
+    """Lightweight legal basis item for structured case cards."""
+
+    law_name: str = Field(default="", description="法律名称")
+    article_no: str = Field(default="", description="条号")
+    summary: str = Field(default="", description="依据摘要")
+
+
+class StructuredClaim(BaseModel):
+    """Claim analysis item optimized for frontend cards and document reuse."""
+
+    claim: str = Field(default="", description="争议焦点或请求")
+    domain: str = Field(default="", description="所属领域")
+    basis: list[ClaimBasis] = Field(default_factory=list, description="请求权基础")
+    supporting_facts: list[str] = Field(default_factory=list, description="支持事实")
+    missing_facts: list[str] = Field(default_factory=list, description="缺失事实")
+    risks: list[str] = Field(default_factory=list, description="风险")
+    suggested_evidence: list[str] = Field(default_factory=list, description="建议证据")
 
 
 class ClaimItem(BaseModel):
@@ -29,12 +50,18 @@ class CaseAnalysisResult(BaseModel):
     """Structured result for case analysis flows."""
 
     case_summary: str = Field(default="", description="案情摘要")
+    case_type: str = Field(default="", description="案件类型")
+    risk_level: RiskLevel = Field(default="unknown", description="风险等级")
     legal_relationships: list[str] = Field(default_factory=list, description="法律关系列表")
+    claims: list[StructuredClaim] = Field(default_factory=list, description="结构化请求/争议焦点")
     possible_claims: list[ClaimItem] = Field(default_factory=list, description="可主张请求列表")
     evidence_checklist: list[str] = Field(default_factory=list, description="证据清单")
     risks: list[str] = Field(default_factory=list, description="风险提示")
     next_actions: list[str] = Field(default_factory=list, description="下一步建议")
+    missing_information: list[str] = Field(default_factory=list, description="缺失信息")
+    document_suggestions: list[str] = Field(default_factory=list, description="可生成文书建议")
     legal_basis: list[SourceItem] = Field(default_factory=list, description="法律依据 sources")
+    warnings: list[str] = Field(default_factory=list, description="结构化解析警告")
 
     @field_validator("possible_claims", mode="before")
     @classmethod
@@ -49,6 +76,25 @@ class CaseAnalysisResult(BaseModel):
                 coerced.append(item)
         return coerced
 
+    @field_validator("risk_level", mode="before")
+    @classmethod
+    def _coerce_risk_level(cls, value):
+        raw = str(value or "").strip().lower()
+        mapping = {
+            "低": "low",
+            "low": "low",
+            "中": "medium",
+            "中等": "medium",
+            "中等偏高": "medium",
+            "medium": "medium",
+            "高": "high",
+            "high": "high",
+            "unknown": "unknown",
+            "不明": "unknown",
+            "未知": "unknown",
+        }
+        return mapping.get(raw, "unknown")
+
     def to_markdown(self) -> str:
         return render_case_analysis_markdown(self)
 
@@ -62,9 +108,14 @@ def build_case_analysis_result(
     legal_relationships: str | list[str] = "",
     user_input: str = "",
     structured_data: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
 ) -> CaseAnalysisResult:
     """Build structured analysis from optional JSON, Markdown, and graph state."""
-    structured_data = structured_data or extract_case_analysis_json(report) or {}
+    if structured_data is None:
+        structured_data, parse_warnings = extract_case_analysis_json_with_warnings(report)
+    else:
+        parse_warnings = []
+    structured_data = structured_data or {}
     sections = _extract_sections(report)
     legal_basis = [SourceItem(**item) for item in normalize_sources(sources or [])]
 
@@ -74,6 +125,24 @@ def build_case_analysis_result(
     if not relationships:
         relationships = _lines_from_text(sections.get("🏷️ 涉及法律关系", ""))
 
+    possible_claims = _build_claim_items(
+        structured_data.get("possible_claims") or structured_data.get("claims"),
+        claims=claims or [],
+        fallback_text=sections.get("🎯 争议焦点", ""),
+        legal_basis=legal_basis,
+    )
+    structured_claims = _build_structured_claims(
+        structured_data.get("claims"),
+        possible_claims=possible_claims,
+        graph_claims=claims or [],
+        legal_basis=legal_basis,
+    )
+    evidence_checklist = _coerce_list(structured_data.get("evidence_checklist", [])) or _lines_from_text(sections.get("📌 证据清单", ""))
+    risks = _coerce_list(structured_data.get("risks", [])) or _lines_from_text(sections.get("⚠️ 不利事实与风险", ""))
+    next_actions = _coerce_list(structured_data.get("next_actions", [])) or _lines_from_text(sections.get("📝 下一步建议", "") or sections.get("🛠️ 处理路径", ""))
+    missing_information = _coerce_list(structured_data.get("missing_information", [])) or _lines_from_text(sections.get("❓ 需要补充的信息", ""))
+    case_type = str(structured_data.get("case_type") or _extract_labeled_value(sections.get("🧾 案情摘要", ""), "案件类型") or "").strip()
+
     result = CaseAnalysisResult(
         case_summary=(
             str(structured_data.get("case_summary") or "").strip()
@@ -81,39 +150,46 @@ def build_case_analysis_result(
             or _plain_text(sections.get("🧾 案情摘要", ""))
             or user_input[:300]
         ),
+        case_type=case_type,
+        risk_level=structured_data.get("risk_level") or _extract_risk_level(sections.get("🧾 案情摘要", "") + "\n" + "\n".join(risks)),
         legal_relationships=relationships,
-        possible_claims=_build_claim_items(
-            structured_data.get("possible_claims"),
-            claims=claims or [],
-            fallback_text=sections.get("🎯 争议焦点", ""),
-            legal_basis=legal_basis,
-        ),
-        evidence_checklist=_coerce_list(structured_data.get("evidence_checklist", []))
-        or _lines_from_text(sections.get("📌 证据清单", "")),
-        risks=_coerce_list(structured_data.get("risks", []))
-        or _lines_from_text(sections.get("⚠️ 不利事实与风险", "")),
-        next_actions=_coerce_list(structured_data.get("next_actions", []))
-        or _lines_from_text(sections.get("📝 下一步建议", "") or sections.get("🛠️ 处理路径", "")),
+        claims=structured_claims,
+        possible_claims=possible_claims,
+        evidence_checklist=evidence_checklist,
+        risks=risks,
+        next_actions=next_actions,
+        missing_information=missing_information,
+        document_suggestions=_coerce_list(structured_data.get("document_suggestions", [])),
         legal_basis=legal_basis,
+        warnings=list(dict.fromkeys([*(warnings or []), *parse_warnings])),
     )
     return _ensure_minimum_content(result)
 
 
 def extract_case_analysis_json(markdown: str) -> dict[str, Any]:
     """Extract optional structured JSON payload emitted by the analysis prompt."""
-    for match in re.finditer(r"```json\s*(\{.*?\})\s*```", markdown or "", re.DOTALL):
+    data, _warnings = extract_case_analysis_json_with_warnings(markdown)
+    return data
+
+
+def extract_case_analysis_json_with_warnings(markdown: str) -> tuple[dict[str, Any], list[str]]:
+    """Extract optional structured JSON payload and report parse warnings."""
+    warnings: list[str] = []
+    candidates = _json_candidates(markdown or "")
+    for candidate in candidates:
         try:
-            data = json.loads(match.group(1))
-        except json.JSONDecodeError:
+            data = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            warnings.append(f"analysis_json_parse_failed: {exc.msg}")
             continue
-        if isinstance(data, dict) and ("possible_claims" in data or "case_summary" in data):
-            return data
-    return {}
+        if isinstance(data, dict) and _looks_like_case_analysis_json(data):
+            return data, warnings
+    return {}, warnings
 
 
 def strip_case_analysis_json(markdown: str) -> str:
     """Remove structured JSON payload from Markdown display text."""
-    return re.sub(r"\n?```json\s*\{.*?\}\s*```\s*", "\n", markdown or "", flags=re.DOTALL).strip()
+    return re.sub(r"\n?```(?:json)?\s*\{.*?\}\s*```\s*", "\n", markdown or "", flags=re.DOTALL).strip()
 
 
 def render_case_analysis_markdown(result: CaseAnalysisResult | dict[str, Any]) -> str:
@@ -180,6 +256,105 @@ def _build_claim_items(
     return items[:8]
 
 
+def _build_structured_claims(
+    value: Any,
+    *,
+    possible_claims: list[ClaimItem],
+    graph_claims: list[dict[str, Any]],
+    legal_basis: list[SourceItem],
+) -> list[StructuredClaim]:
+    items: list[StructuredClaim] = []
+    if isinstance(value, list):
+        for raw in value:
+            item = _structured_claim_from_any(raw, legal_basis)
+            if item.claim:
+                items.append(item)
+    if items:
+        return items
+
+    graph_domains = {
+        str(item.get("claim_text") or "").strip(): str(item.get("domain") or "").strip()
+        for item in graph_claims
+    }
+    for item in possible_claims:
+        basis = [_basis_from_source(source) for source in (item.legal_basis or legal_basis)]
+        items.append(StructuredClaim(
+            claim=item.claim_name,
+            domain=graph_domains.get(item.claim_name, ""),
+            basis=[b for b in basis if b.law_name or b.article_no or b.summary],
+            supporting_facts=[],
+            missing_facts=item.required_evidence,
+            risks=item.risk_notes,
+            suggested_evidence=item.required_evidence,
+        ))
+    return items[:8]
+
+
+def _structured_claim_from_any(value: Any, legal_basis: list[SourceItem]) -> StructuredClaim:
+    if isinstance(value, StructuredClaim):
+        return value
+    if isinstance(value, str):
+        return StructuredClaim(claim=value.strip())
+    if not isinstance(value, dict):
+        return StructuredClaim()
+
+    basis = value.get("basis")
+    if not basis:
+        basis = value.get("legal_basis")
+    normalized_basis = _coerce_basis_list(basis, legal_basis)
+    return StructuredClaim(
+        claim=str(value.get("claim") or value.get("claim_name") or value.get("name") or "").strip(),
+        domain=str(value.get("domain") or "").strip(),
+        basis=normalized_basis,
+        supporting_facts=_coerce_list(value.get("supporting_facts", [])),
+        missing_facts=_coerce_list(value.get("missing_facts") or value.get("required_evidence", [])),
+        risks=_coerce_list(value.get("risks") or value.get("risk_notes", [])),
+        suggested_evidence=_coerce_list(value.get("suggested_evidence") or value.get("required_evidence", [])),
+    )
+
+
+def _coerce_basis_list(value: Any, fallback_sources: list[SourceItem]) -> list[ClaimBasis]:
+    if isinstance(value, list):
+        basis = []
+        for raw in value:
+            if isinstance(raw, ClaimBasis):
+                basis.append(raw)
+            elif isinstance(raw, SourceItem):
+                basis.append(_basis_from_source(raw))
+            elif isinstance(raw, dict):
+                source = _source_from_basis_dict(raw)
+                if source:
+                    basis.append(_basis_from_source(source))
+                else:
+                    basis.append(ClaimBasis(
+                        law_name=str(raw.get("law_name") or raw.get("law") or "").strip(),
+                        article_no=str(raw.get("article_no") or raw.get("article") or "").strip(),
+                        summary=str(raw.get("summary") or raw.get("text") or raw.get("content") or "").strip(),
+                    ))
+            elif str(raw or "").strip():
+                basis.append(ClaimBasis(summary=str(raw).strip()))
+        return basis[:8]
+    return [_basis_from_source(source) for source in fallback_sources[:5]]
+
+
+def _source_from_basis_dict(raw: dict[str, Any]) -> SourceItem | None:
+    source_like_keys = {"source", "title", "content", "full_content", "text", "source_type"}
+    if not source_like_keys.intersection(raw.keys()):
+        return None
+    try:
+        return SourceItem(**normalize_sources([raw])[0])
+    except Exception:
+        return None
+
+
+def _basis_from_source(source: SourceItem) -> ClaimBasis:
+    return ClaimBasis(
+        law_name=source.law_name or source.title or source.source,
+        article_no=source.article_no,
+        summary=source.content or source.text[:160],
+    )
+
+
 def _claim_item_from_any(value: Any, legal_basis: list[SourceItem]) -> ClaimItem:
     if isinstance(value, ClaimItem):
         return value
@@ -192,15 +367,15 @@ def _claim_item_from_any(value: Any, legal_basis: list[SourceItem]) -> ClaimItem
     if support_level not in {"strong", "medium", "weak", "unknown"}:
         support_level = "unknown"
 
-    basis = value.get("legal_basis")
+    basis = value.get("legal_basis") or value.get("basis")
     normalized_basis = [SourceItem(**item) for item in normalize_sources(basis)] if basis else legal_basis
     return ClaimItem(
-        claim_name=str(value.get("claim_name") or value.get("name") or "").strip(),
+        claim_name=str(value.get("claim_name") or value.get("claim") or value.get("name") or "").strip(),
         support_level=support_level,  # type: ignore[arg-type]
-        reason=str(value.get("reason") or "").strip(),
-        required_evidence=_coerce_list(value.get("required_evidence", [])),
+        reason=str(value.get("reason") or value.get("summary") or "").strip(),
+        required_evidence=_coerce_list(value.get("required_evidence") or value.get("missing_facts") or value.get("suggested_evidence", [])),
         legal_basis=normalized_basis,
-        risk_notes=_coerce_list(value.get("risk_notes", [])),
+        risk_notes=_coerce_list(value.get("risk_notes") or value.get("risks", [])),
     )
 
 
@@ -217,6 +392,7 @@ def _fallback_claim_item(name: str, legal_basis: list[SourceItem]) -> ClaimItem:
 
 def _ensure_minimum_content(result: CaseAnalysisResult) -> CaseAnalysisResult:
     result.possible_claims = [_claim_item_from_any(item, result.legal_basis) for item in result.possible_claims]
+    result.claims = [_structured_claim_from_any(item, result.legal_basis) for item in result.claims]
     if not result.legal_relationships:
         result.legal_relationships = ["需结合具体事实进一步确认法律关系"]
     if not result.possible_claims:
@@ -228,13 +404,72 @@ def _ensure_minimum_content(result: CaseAnalysisResult) -> CaseAnalysisResult:
             legal_basis=result.legal_basis,
             risk_notes=["证据不足时不能直接判断一定胜诉。"],
         )]
+    if not result.claims:
+        result.claims = _build_structured_claims(
+            [],
+            possible_claims=result.possible_claims,
+            graph_claims=[],
+            legal_basis=result.legal_basis,
+        )
     if not result.evidence_checklist:
         result.evidence_checklist = ["合同、沟通记录、付款凭证、系统日志、损失证明等关键证据"]
     if not result.risks:
         result.risks = ["证据链、损失金额、因果关系和时效问题仍需进一步核实"]
     if not result.next_actions:
         result.next_actions = ["先固定证据，再根据责任基础选择协商、投诉举报、仲裁或诉讼路径"]
+    if not result.missing_information:
+        missing = []
+        for claim in result.claims:
+            missing.extend(claim.missing_facts)
+        result.missing_information = list(dict.fromkeys(missing))[:8]
     return result
+
+
+def _json_candidates(markdown: str) -> list[str]:
+    candidates = []
+    for match in re.finditer(r"```(?:json)?\s*(.*?)\s*```", markdown or "", re.DOTALL):
+        candidate = match.group(1).strip()
+        if candidate.startswith("{"):
+            candidates.append(candidate)
+    stripped = (markdown or "").strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+    if not candidates:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start != -1 and end > start:
+            candidates.append(stripped[start:end + 1])
+    return candidates
+
+
+def _looks_like_case_analysis_json(data: dict[str, Any]) -> bool:
+    return any(key in data for key in (
+        "case_summary",
+        "case_type",
+        "risk_level",
+        "legal_relationships",
+        "claims",
+        "possible_claims",
+    ))
+
+
+def _extract_labeled_value(text: str, label: str) -> str:
+    pattern = re.compile(rf"{re.escape(label)}\s*[：:]\s*([^\n]+)")
+    match = pattern.search(text or "")
+    return match.group(1).strip().strip("*") if match else ""
+
+
+def _extract_risk_level(text: str) -> str:
+    labeled = _extract_labeled_value(text, "风险等级")
+    if labeled:
+        return labeled
+    if any(word in text for word in ("高风险", "风险较高", "重大风险")):
+        return "high"
+    if any(word in text for word in ("中等", "中风险", "风险不明", "需进一步核实")):
+        return "medium"
+    if any(word in text for word in ("低风险", "风险较低")):
+        return "low"
+    return "unknown"
 
 
 def _extract_sections(markdown: str) -> dict[str, str]:

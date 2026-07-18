@@ -157,6 +157,7 @@ async def ask_analysis_stream(
         structured_result = report_result.get("analysis_result", {})
         sources = report_result.get("sources", [])
         case_results = report_result.get("case_results", [])
+        analysis_warnings = report_result.get("warnings", [])
         logger.info("[analysis_stream] 报告生成完成: %d 字", len(report))
 
         logger.info("[analysis_stream] yield substep: generate")
@@ -255,6 +256,7 @@ async def ask_analysis_stream(
             "analysis_result": structured_result,
             "analysis_markdown": report,
             "case_analysis_id": analysis_record["case_analysis_id"],
+            "warnings": analysis_warnings,
             "timings": {"generate": gen_ms},
         }
     except Exception:

@@ -25,7 +25,7 @@ from app.core import (
 from app.rag_chain import _retrieve_context, _verify_citations_semantic
 from app.schemas.case_analysis import (
     build_case_analysis_result,
-    extract_case_analysis_json,
+    extract_case_analysis_json_with_warnings,
     strip_case_analysis_json,
 )
 
@@ -260,31 +260,42 @@ REPORT_PROMPT = """你是一位资深中国法律顾问。请根据以下案情�
 JSON 规则：
 - Markdown 报告之后必须追加一个 ```json 代码块。
 - JSON 只输出一个对象，不要在 JSON 外解释。
-- possible_claims 必须是数组，每一项至少包含：
-  claim_name、support_level、reason、required_evidence、legal_basis、risk_notes。
-- support_level 只能是 strong / medium / weak / unknown。
-- 证据不足、事实缺失、时效不明或主体关系未确认时，不得写 strong。
-- legal_basis 可以引用已检索到的法条名称和条号；不确定时留空数组，不得编造。
+- JSON 必须符合下方 schema；不确定字段用空字符串、空数组或 "unknown"。
+- 只基于用户提供事实、拆解结果和检索依据，不得编造用户没有提供的事实。
+- risk_level 只能是 low / medium / high / unknown。
+- basis 只能引用已检索到且与该 claim 相关的法条名称和条号；不确定时留空数组，不得编造。
+- supporting_facts 只能写用户已经提供或案情拆解中明确存在的事实。
+- missing_facts、missing_information 用于承载仍需补充的信息。
+- 如果涉及可生成文书，document_suggestions 写文书类型，例如 "劳动仲裁申请书"；无法判断时留空数组。
 
 JSON 示例格式：
 ```json
 {{
   "case_summary": "一句话案情摘要",
+  "case_type": "劳动争议",
+  "risk_level": "unknown",
   "legal_relationships": ["劳动关系", "工资支付争议"],
-  "possible_claims": [
+  "claims": [
     {{
-      "claim_name": "支付拖欠工资",
-      "support_level": "unknown",
-      "reason": "需要结合工资约定、考勤和支付记录判断。",
-      "required_evidence": ["劳动合同或工资约定", "考勤记录", "工资流水"],
-      "legal_basis": [],
-      "risk_notes": ["若工资标准或欠付期间无法证明，支持程度会降低。"]
+      "claim": "支付拖欠工资",
+      "domain": "劳动",
+      "basis": [
+        {{
+          "law_name": "中华人民共和国劳动合同法",
+          "article_no": "第三十条",
+          "summary": "用人单位应当按照劳动合同约定和国家规定及时足额支付劳动报酬。"
+        }}
+      ],
+      "supporting_facts": [],
+      "missing_facts": ["工资标准", "欠付期间", "工资支付记录"],
+      "risks": ["若工资标准或欠付期间无法证明，支持程度会降低。"],
+      "suggested_evidence": ["劳动合同或工资约定", "考勤记录", "工资流水"]
     }}
   ],
   "evidence_checklist": ["劳动合同", "工资流水"],
-  "risks": ["证据不足时不能判断一定胜诉"],
   "next_actions": ["整理证据后申请劳动仲裁"],
-  "legal_basis": []
+  "missing_information": ["工资标准", "欠付期间"],
+  "document_suggestions": ["劳动仲裁申请书"]
 }}
 ```
 """
@@ -629,7 +640,9 @@ def generate_report(state: AnalysisState) -> dict:
         else:
             report += "\n\n" + statute_section
 
-    structured_payload = extract_case_analysis_json(report)
+    structured_payload, analysis_warnings = extract_case_analysis_json_with_warnings(report)
+    for warning in analysis_warnings:
+        logger.warning("[报告生成] %s", warning)
     report = strip_case_analysis_json(report)
     report = normalize_analysis_report(report, state.get("user_input", ""))
 
@@ -666,12 +679,14 @@ def generate_report(state: AnalysisState) -> dict:
                     legal_relationships=state.get("legal_relationships", ""),
                     user_input=state.get("user_input", ""),
                     structured_data=structured_payload,
+                    warnings=analysis_warnings,
                 )
                 return {
                     "report": report,
                     "analysis_result": analysis_result.model_dump(),
                     "sources": sources,
                     "case_results": case_results,
+                    "warnings": analysis_warnings,
                 }
             logger.info("[报告生成] 案例检索开始 (domain=%s, top_k=%d)...", primary_domain, case_top_k)
             case_results = case_searcher.search(
@@ -690,12 +705,14 @@ def generate_report(state: AnalysisState) -> dict:
         legal_relationships=state.get("legal_relationships", ""),
         user_input=state.get("user_input", ""),
         structured_data=structured_payload,
+        warnings=analysis_warnings,
     )
     return {
         "report": report,
         "analysis_result": analysis_result.model_dump(),
         "sources": sources,
         "case_results": case_results,
+        "warnings": analysis_warnings,
     }
 
 
@@ -867,4 +884,5 @@ def run_analysis(user_input: str, session_id: str = "default",
         "analysis_result": report_result.get("analysis_result", {}),
         "sources": report_result.get("sources", []),
         "case_results": report_result.get("case_results", []),
+        "warnings": report_result.get("warnings", []),
     }

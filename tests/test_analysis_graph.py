@@ -293,11 +293,12 @@ class TestREPORTPromptRules:
 
     def test_contains_structured_claim_json_rules(self):
         """报告 prompt 应要求输出请求权基础结构化 JSON"""
-        assert "possible_claims" in REPORT_PROMPT
-        assert "claim_name" in REPORT_PROMPT
-        assert "support_level" in REPORT_PROMPT
-        assert "strong / medium / weak / unknown" in REPORT_PROMPT
-        assert "证据不足" in REPORT_PROMPT
+        assert '"claims"' in REPORT_PROMPT
+        assert '"claim"' in REPORT_PROMPT
+        assert '"basis"' in REPORT_PROMPT
+        assert '"missing_facts"' in REPORT_PROMPT
+        assert "low / medium / high / unknown" in REPORT_PROMPT
+        assert "事实或证据支撑" in REPORT_PROMPT
 
     def test_disclaimer_generic(self):
         """免责声明应为通用版，不写死劳动争议"""
@@ -530,6 +531,7 @@ class TestStructuredCaseAnalysisResult:
         assert structured["case_summary"] == "员工称公司拖欠工资且未签劳动合同"
         assert structured["legal_relationships"]
         assert structured["possible_claims"]
+        assert structured["claims"]
         claim = structured["possible_claims"][0]
         assert claim["claim_name"] == "支付拖欠工资"
         assert claim["support_level"] == "medium"
@@ -539,3 +541,39 @@ class TestStructuredCaseAnalysisResult:
         assert structured["risks"]
         assert structured["next_actions"]
         assert "legal_basis" in structured
+
+    def test_generate_report_keeps_markdown_when_structured_json_is_invalid(self, monkeypatch):
+        import app.analysis_graph as analysis_graph
+
+        class Response:
+            content = (
+                "### 🧾 案情摘要\n\n员工称公司拖欠工资。\n\n"
+                "### 🏷️ 涉及法律关系\n\n- 劳动关系\n\n"
+                "### 🎯 争议焦点\n\n1. 是否拖欠工资。\n\n"
+                "```json\n"
+                "{\"case_summary\":\"员工称公司拖欠工资\"\n"
+                "```"
+            )
+
+        class FakeLLM:
+            def invoke(self, _prompt):
+                return Response()
+
+        monkeypatch.setattr(analysis_graph, "_lightweight_llm", FakeLLM())
+        monkeypatch.setattr(analysis_graph, "_llm", FakeLLM())
+        monkeypatch.setattr(analysis_graph, "_components", {})
+
+        result = generate_report({
+            "claims": [{"claim_text": "支付拖欠工资", "domain": "劳动"}],
+            "claim_contexts": [],
+            "cross_analysis": "存在工资支付争议。",
+            "time_nodes": [],
+            "user_input": "公司拖欠工资三个月。",
+            "case_summary": "员工称公司拖欠工资",
+            "legal_relationships": "劳动关系",
+        })
+
+        assert "员工称公司拖欠工资" in result["report"]
+        assert result["analysis_result"]["case_summary"]
+        assert result["warnings"]
+        assert result["warnings"][0].startswith("analysis_json_parse_failed")

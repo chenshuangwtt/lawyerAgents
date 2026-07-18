@@ -35,11 +35,18 @@ def test_document_stream_need_more_info_returns_frontend_friendly_missing_fields
 
     assert done["status"] == "need_more_info"
     assert "applicant_name" in done["missing_fields"]
+    assert "applicant_phone" in done["missing_fields"]
+    assert "respondent_address" in done["missing_fields"]
     assert "申请人姓名" in done["missing_field_names"]
     assert done["clarification_questions"]
-    assert len(done["clarification_questions"]) == len(done["missing_fields"])
+    assert len(done["clarification_questions"]) <= 3
     assert "还需要补充以下信息后才能生成劳动仲裁申请书" in _token_text(events)
+    assert done["document_type"] == LABOR_DOC_TYPE
+    assert done["document_markdown"] == ""
+    assert done["can_export"] is False
+    assert done["field_status"]["applicant_id"] == "missing"
     assert pending["doc_type"] == LABOR_DOC_TYPE
+    assert pending["document_type"] == LABOR_DOC_TYPE
     assert pending["case_state"] == {}
     assert pending["extracted_fields"]["monthly_salary"] == "8000元"
     assert pending["missing_fields"] == done["missing_fields"]
@@ -66,7 +73,8 @@ def test_document_stream_second_round_merges_existing_fields_and_clears_pending(
 
     second_events = asyncio.run(_collect_document_events(
         None,
-        "申请人张三，被申请人是北京示例科技有限公司，2023年1月1日入职，2024年6月1日被辞退。",
+        "申请人张三，电话13800000000，被申请人是北京示例科技有限公司，"
+        "公司地址北京市朝阳区示例路1号，2023年1月1日入职，2024年6月1日被辞退。",
         session_id=session_id,
         document_type=pending["doc_type"],
         case_state=pending["case_state"],
@@ -75,6 +83,9 @@ def test_document_stream_second_round_merges_existing_fields_and_clears_pending(
     second_done = _done_event(second_events)
 
     assert second_done["status"] == "ready"
+    assert second_done["document_type"] == LABOR_DOC_TYPE
+    assert second_done["document_markdown"]
+    assert second_done["can_export"] is True
     fields = second_done["extracted_fields"]
     assert fields["applicant_name"] == "张三"
     assert fields["respondent_name"] == "北京示例科技有限公司"
@@ -82,4 +93,5 @@ def test_document_stream_second_round_merges_existing_fields_and_clears_pending(
     assert fields["employment_end_date"] == "2024年6月1日"
     assert fields["monthly_salary"] == "8000元"
     assert second_done["missing_fields"] == []
+    assert second_done["field_status"]["applicant_id"] == "missing"
     assert get_pending_document(session_id) is None
