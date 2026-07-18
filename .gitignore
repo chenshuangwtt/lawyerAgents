@@ -47,6 +47,7 @@ Thumbs.db
 .codegraph/
 
 # 评测运行输出
+eval/archive/experiments/
 eval/results.jsonl
 eval/eval_results.jsonl
 eval/retrieval_report.md
