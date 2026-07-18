@@ -33,6 +33,24 @@ def test_expected_article_hit_matches_law_and_article_in_sources():
     assert run_eval.missing_expected_articles(response, ["劳动合同法第八十七条"]) == ["劳动合同法第八十七条"]
 
 
+def test_expected_law_hit_uses_sources_and_reports_misses():
+    run_eval = _load_run_eval_module()
+    response = {
+        "answer": "可先收集劳动关系证据。",
+        "sources": [
+            {
+                "law_name": "中华人民共和国劳动合同法",
+                "article_no": "第八十二条",
+                "text": "第八十二条 用人单位未订立书面劳动合同的，应当支付二倍工资。",
+            }
+        ],
+    }
+
+    assert run_eval.expected_law_hit(response, ["劳动合同法"]) is True
+    assert run_eval.expected_law_hit(response, ["公司法"]) is False
+    assert run_eval.missing_expected_laws(response, ["劳动合同法", "公司法"]) == ["公司法"]
+
+
 def test_citation_supported_rate_uses_answer_citations_and_sources():
     run_eval = _load_run_eval_module()
     answer = "根据民法典第一千零七十九条，法院应当进行调解。另见《劳动合同法》第八十二条。"
@@ -52,6 +70,31 @@ def test_citation_supported_rate_uses_answer_citations_and_sources():
     assert stats["unsupported_citations"][0]["law_name"] == "劳动合同法"
 
 
+def test_failure_reasons_classify_rule_based_failures():
+    run_eval = _load_run_eval_module()
+    row = {
+        "error": "",
+        "hit_expected_laws": False,
+        "expected_articles": ["公司法第十五条"],
+        "hit_expected_articles": False,
+        "unsupported_citations": [{"text": "《公司法》第十五条"}],
+        "expected_domain": "公司",
+        "domain": "合同",
+        "domain_hit": False,
+        "latency_ms": 45000,
+    }
+
+    reasons = run_eval.failure_reasons(row, latency_threshold_ms=30000)
+
+    assert reasons == [
+        "retrieval_law_miss",
+        "retrieval_article_miss",
+        "citation_unsupported",
+        "domain_mismatch",
+        "timeout_or_latency_high",
+    ]
+
+
 def test_build_report_includes_overview_domain_failures_and_latency():
     run_eval = _load_run_eval_module()
     rows = [
@@ -61,6 +104,7 @@ def test_build_report_includes_overview_domain_failures_and_latency():
             "expected_domain": "劳动",
             "expected_laws": ["劳动合同法"],
             "expected_articles": ["劳动合同法第八十二条"],
+            "difficulty": "easy",
             "actual_sources": ["中华人民共和国劳动合同法 第八十二条"],
             "domain": "劳动",
             "latency_ms": 100,
@@ -70,6 +114,8 @@ def test_build_report_includes_overview_domain_failures_and_latency():
             "citation_supported_count": 1,
             "unsupported_citations": [],
             "domain_hit": True,
+            "reason": "",
+            "reasons": [],
             "miss_reason": "",
             "error": "",
         },
@@ -79,6 +125,7 @@ def test_build_report_includes_overview_domain_failures_and_latency():
             "expected_domain": "公司",
             "expected_laws": ["公司法"],
             "expected_articles": ["公司法第十五条"],
+            "difficulty": "hard",
             "actual_sources": ["民法典 第五百零四条"],
             "domain": "合同",
             "latency_ms": 3000,
@@ -90,6 +137,8 @@ def test_build_report_includes_overview_domain_failures_and_latency():
             "citation_supported_count": 0,
             "unsupported_citations": [],
             "domain_hit": False,
+            "reason": "retrieval_law_miss",
+            "reasons": ["retrieval_law_miss", "retrieval_article_miss", "domain_mismatch"],
             "miss_reason": "missing expected_laws: 公司法",
             "error": "",
         },
@@ -99,6 +148,7 @@ def test_build_report_includes_overview_domain_failures_and_latency():
             "expected_domain": "刑事",
             "expected_laws": ["刑法"],
             "expected_articles": [],
+            "difficulty": "medium",
             "actual_sources": [],
             "latency_ms": 10,
             "hit_expected_laws": False,
@@ -106,6 +156,8 @@ def test_build_report_includes_overview_domain_failures_and_latency():
             "citation_total": 0,
             "citation_supported_count": 0,
             "domain_hit": True,
+            "reason": "api_error",
+            "reasons": ["api_error"],
             "miss_reason": "HTTP 500",
             "error": "HTTP 500",
         },
@@ -114,12 +166,16 @@ def test_build_report_includes_overview_domain_failures_and_latency():
     report = run_eval.build_report(rows, "http://localhost:9000")
 
     assert "## 总览表" in report
-    assert "hit_expected_articles" in report
-    assert "domain_accuracy" in report
+    assert "expected_article_hit_rate" in report
+    assert "domain_hit_rate" in report
     assert "## 分领域表" in report
+    assert "## 分难度表" in report
+    assert "## 失败归因统计" in report
     assert "## 失败样例列表" in report
+    assert "retrieval_law_miss" in report
+    assert "domain_mismatch" in report
     assert "miss" in report
     assert "公司法" in report
     assert "## 高延迟样例列表" in report
     assert "3000" in report
-
+    assert "## 简短优化建议" in report

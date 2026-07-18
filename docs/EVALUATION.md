@@ -17,14 +17,18 @@ RAG 项目的核心问题不是“能不能回答”，而是回答是否建立�
 
 | 指标 | 说明 |
 | --- | --- |
-| 检索命中率 | top_k sources 是否包含期望法律或关键依据 |
-| 引用准确率 | 回答正文引用是否能在 sources 中找到 |
+| `expected_law_hit_rate` | `sources` 是否覆盖题目声明的 `expected_laws` |
+| `expected_article_hit_rate` | `sources` 是否覆盖题目声明的 `expected_articles` |
+| `citation_supported_rate` | 回答正文中的显式法名 + 条号引用是否能在 `sources` 中找到 |
+| `domain_hit_rate` | 后端返回领域是否与题目 `domain` 基本匹配 |
 | 幻觉率 | 是否出现无依据的事实、条号、金额、地区标准或绝对承诺 |
 | 回答结构完整率 | 是否稳定包含判定、依据、建议、免责声明等结构 |
-| 平均延迟 | 全部请求平均耗时 |
-| P95 延迟 | 95 分位请求耗时，观察长尾性能 |
+| `avg_latency_ms` | 成功请求的平均端到端耗时 |
+| `p95_latency_ms` | 成功请求 95 分位耗时，观察长尾性能 |
 | cache hit rate | 重复问题中命中语义缓存的比例 |
 | 用户反馈满意度 | 根据点赞、点踩、人工审核记录统计 |
+
+当前 `eval/run_eval.py` 不依赖外部 LLM Judge，只做规则评测。它更适合作为回归报警和问题定位入口，而不是替代人工法律审查。
 
 ## 3. 评测集格式
 
@@ -107,12 +111,15 @@ python eval/run_eval.py --api-key your-chat-api-key
 - `answer`
 - `sources`
 - `domain`
+- `difficulty`
 - `latency_ms`
 - `error`
 - `hit_expected_laws`
 - `hit_expected_articles`
 - `citation_supported_rate`
 - `domain_hit`
+- `reason`
+- `reasons`
 - `missing_expected_laws`
 - `missing_expected_articles`
 
@@ -122,7 +129,38 @@ python eval/run_eval.py --api-key your-chat-api-key
 
 `citation_supported_rate` 检查回答正文中显式出现的“法名 + 条号”引用，有多少能在 `sources` 中找到。该指标不依赖外部 LLM Judge。
 
-`eval/report.md` 会输出总览表、分领域表、失败样例列表和高延迟样例列表。失败样例包含 `id`、`question`、`expected_laws`、`actual_sources`、`error` 或 miss reason，便于定位召回、排序、引用或领域分类问题。
+### 失败归因
+
+脚本会为失败样例补充规则归因：
+
+| reason | 说明 |
+| --- | --- |
+| `retrieval_law_miss` | `sources` 未命中 `expected_laws` |
+| `retrieval_article_miss` | `sources` 未命中 `expected_articles` |
+| `citation_unsupported` | 回答正文引用的法名 + 条号无法被 `sources` 支撑 |
+| `domain_mismatch` | 返回领域与题目期望领域不匹配 |
+| `api_error` | HTTP、连接、服务异常等接口错误 |
+| `timeout_or_latency_high` | 请求超时或端到端耗时超过阈值 |
+
+`reason` 是主归因，`reasons` 是完整归因列表。同一道题可能同时出现多个原因，例如条文未命中并且领域分类错误。
+
+默认高延迟阈值为 30000ms，可通过以下参数调整：
+
+```powershell
+python eval/run_eval.py --latency-threshold-ms 45000
+```
+
+### Markdown 报告结构
+
+`eval/report.md` 会输出：
+
+- 总览表：总题数、成功/错误数、法律命中率、条文命中率、引用支持率、领域命中率、平均延迟、P95 延迟。
+- 分领域表：每个 `domain` 的题量、命中率、引用支持率、领域命中率和延迟。
+- 分难度表：按 `easy / medium / hard / 未标注` 汇总命中率和延迟。
+- 失败归因统计：按 `reason` 聚合失败数量。
+- 失败样例列表：包含 `id`、领域、难度、归因、问题、期望法律、期望条文、实际来源和错误说明。
+- 高延迟样例列表：输出 latency 最高的 Top 10 问题。
+- 简短优化建议：根据归因结果给出检索、排序、引用、分类或延迟优化方向。
 
 ## 6. 后续计划
 
@@ -132,6 +170,6 @@ python eval/run_eval.py --api-key your-chat-api-key
 - 分领域 hit@k 统计
 - 引用条号准确率检查
 - 延迟分阶段统计
-- 失败样例自动归因
+- 更细的失败样例自动归因
 
 评测报告建议保留失败样例，按“召回失败、排序失败、上下文污染、引用错误、生成幻觉、延迟过高”分类，便于持续优化。

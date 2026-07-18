@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_QUESTIONS = ROOT / "questions.jsonl"
 DEFAULT_RESULTS = ROOT / "results.jsonl"
 DEFAULT_REPORT = ROOT / "report.md"
+DEFAULT_LATENCY_THRESHOLD_MS = 30000
 
 ARTICLE_PATTERN = (
     r"第[一二三四五六七八九十百千万亿零〇两\d]+条"
@@ -326,6 +327,7 @@ def evaluate_one(item: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         "expected_laws": _coerce_list(item.get("expected_laws", [])),
         "expected_articles": _coerce_list(item.get("expected_articles", [])),
         "type": item.get("type", "qa"),
+        "difficulty": str(item.get("difficulty") or "未标注"),
         "answer": "",
         "sources": [],
         "actual_sources": [],
@@ -341,6 +343,8 @@ def evaluate_one(item: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         "matched_citations": [],
         "unsupported_citations": [],
         "domain_hit": True,
+        "reason": "",
+        "reasons": [],
         "miss_reason": "",
         "error": "",
     }
@@ -360,12 +364,37 @@ def evaluate_one(item: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         result["error"] = f"HTTP {exc.code}: {exc.reason}"
     except error.URLError as exc:
         result["error"] = f"连接失败: {exc.reason}"
+    except TimeoutError as exc:
+        result["error"] = f"TimeoutError: {exc}"
     except Exception as exc:  # noqa: BLE001 - 评测脚本需要记录单条失败并继续
         result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         result["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        result["reasons"] = failure_reasons(result, args.latency_threshold_ms)
+        result["reason"] = result["reasons"][0] if result["reasons"] else ""
         result["miss_reason"] = miss_reason(result)
     return result
+
+
+def failure_reasons(row: dict[str, Any], latency_threshold_ms: float) -> list[str]:
+    reasons: list[str] = []
+    error_text = str(row.get("error") or "")
+    if error_text:
+        if "timeout" in error_text.lower() or "timed out" in error_text.lower():
+            reasons.append("timeout_or_latency_high")
+        reasons.append("api_error")
+        return reasons
+    if not row.get("hit_expected_laws", True):
+        reasons.append("retrieval_law_miss")
+    if row.get("expected_articles") and not row.get("hit_expected_articles", True):
+        reasons.append("retrieval_article_miss")
+    if row.get("unsupported_citations"):
+        reasons.append("citation_unsupported")
+    if row.get("expected_domain") and row.get("domain") and not row.get("domain_hit", True):
+        reasons.append("domain_mismatch")
+    if float(row.get("latency_ms") or 0) > latency_threshold_ms:
+        reasons.append("timeout_or_latency_high")
+    return reasons
 
 
 def miss_reason(row: dict[str, Any]) -> str:
@@ -383,11 +412,13 @@ def miss_reason(row: dict[str, Any]) -> str:
     if row.get("unsupported_citations"):
         citations = [item.get("text", "") for item in row.get("unsupported_citations", [])]
         reasons.append("unsupported citations: " + "、".join(citations[:5]))
+    if row.get("reason") == "timeout_or_latency_high" or "timeout_or_latency_high" in (row.get("reasons") or []):
+        reasons.append(f"latency high: {row.get('latency_ms')}ms")
     return "；".join(reason for reason in reasons if reason)
 
 
 def is_failed_case(row: dict[str, Any]) -> bool:
-    return bool(row.get("error") or row.get("miss_reason"))
+    return bool(row.get("error") or row.get("miss_reason") or row.get("reasons"))
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -411,35 +442,63 @@ def _percent(numerator: int, denominator: int) -> str:
     return f"{round(numerator / denominator * 100, 2)}%"
 
 
+def _rate(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(numerator / denominator, 4)
+
+
+def _rate_percent(rate: float | None) -> str:
+    if rate is None:
+        return "N/A"
+    return f"{round(rate * 100, 2)}%"
+
+
 def _mean(values: list[float]) -> float:
     return round(statistics.mean(values), 2) if values else 0.0
 
 
-def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
-    total = len(results)
-    errors = [r for r in results if r.get("error")]
-    successes = [r for r in results if not r.get("error")]
+def _metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    successes = [r for r in rows if not r.get("error")]
+    law_rows = [r for r in successes if r.get("expected_laws")]
     article_rows = [r for r in successes if r.get("expected_articles")]
     domain_rows = [r for r in successes if r.get("expected_domain") and r.get("domain")]
     latencies = [float(r.get("latency_ms") or 0) for r in successes]
     citation_total = sum(int(r.get("citation_total") or 0) for r in successes)
     citation_supported = sum(int(r.get("citation_supported_count") or 0) for r in successes)
     return {
-        "total": total,
+        "total": len(rows),
         "successes": len(successes),
-        "errors": len(errors),
-        "law_hits": sum(1 for r in successes if r.get("hit_expected_laws")),
-        "law_total": len(successes),
+        "errors": len(rows) - len(successes),
+        "law_hits": sum(1 for r in law_rows if r.get("hit_expected_laws")),
+        "law_total": len(law_rows),
+        "expected_law_hit_rate": _rate(sum(1 for r in law_rows if r.get("hit_expected_laws")), len(law_rows)),
         "article_hits": sum(1 for r in article_rows if r.get("hit_expected_articles")),
         "article_total": len(article_rows),
+        "expected_article_hit_rate": _rate(
+            sum(1 for r in article_rows if r.get("hit_expected_articles")),
+            len(article_rows),
+        ),
         "citation_supported": citation_supported,
         "citation_total": citation_total,
-        "avg_latency_ms": _mean(latencies),
-        "p95_latency_ms": round(percentile(latencies, 0.95), 2) if latencies else 0.0,
-        "error_rate": _percent(len(errors), total),
+        "citation_supported_rate": _rate(citation_supported, citation_total) if citation_total else 1.0,
         "domain_hits": sum(1 for r in domain_rows if r.get("domain_hit")),
         "domain_total": len(domain_rows),
+        "domain_hit_rate": _rate(sum(1 for r in domain_rows if r.get("domain_hit")), len(domain_rows)),
+        "avg_latency_ms": _mean(latencies),
+        "p95_latency_ms": round(percentile(latencies, 0.95), 2) if latencies else 0.0,
     }
+
+
+def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
+    summary = _metric_summary(results)
+    total = summary["total"]
+    errors = [r for r in results if r.get("error")]
+    summary.update({
+        "errors": len(errors),
+        "error_rate": _percent(len(errors), total),
+    })
+    return summary
 
 
 def summarize_by_domain(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -448,22 +507,30 @@ def summarize_by_domain(results: list[dict[str, Any]]) -> dict[str, dict[str, An
         domain = row.get("expected_domain") or row.get("domain") or "未标注"
         groups[str(domain)].append(row)
 
-    summaries: dict[str, dict[str, Any]] = {}
-    for domain, rows in sorted(groups.items(), key=lambda item: item[0]):
-        successes = [r for r in rows if not r.get("error")]
-        article_rows = [r for r in successes if r.get("expected_articles")]
-        failed = [r for r in rows if is_failed_case(r)]
-        latencies = [float(r.get("latency_ms") or 0) for r in successes]
-        summaries[domain] = {
-            "total": len(rows),
-            "law_hits": sum(1 for r in successes if r.get("hit_expected_laws")),
-            "law_total": len(successes),
-            "article_hits": sum(1 for r in article_rows if r.get("hit_expected_articles")),
-            "article_total": len(article_rows),
-            "avg_latency_ms": _mean(latencies),
-            "failed_cases": [str(r.get("id", "")) for r in failed],
-        }
-    return summaries
+    return {
+        domain: {**_metric_summary(rows), "failed_cases": [str(r.get("id", "")) for r in rows if is_failed_case(r)]}
+        for domain, rows in sorted(groups.items(), key=lambda item: item[0])
+    }
+
+
+def summarize_by_difficulty(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    order = {"easy": 0, "medium": 1, "hard": 2, "未标注": 3}
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in results:
+        difficulty = str(row.get("difficulty") or "未标注")
+        groups[difficulty].append(row)
+    return {
+        difficulty: _metric_summary(rows)
+        for difficulty, rows in sorted(groups.items(), key=lambda item: (order.get(item[0], 99), item[0]))
+    }
+
+
+def summarize_reasons(results: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for row in results:
+        for reason in row.get("reasons") or []:
+            counts[str(reason)] += 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
 def _md_cell(value: Any) -> str:
@@ -479,10 +546,11 @@ def _truncate(value: Any, limit: int = 160) -> str:
 def build_report(results: list[dict[str, Any]], base_url: str) -> str:
     summary = summarize(results)
     domain_summary = summarize_by_domain(results)
+    difficulty_summary = summarize_by_difficulty(results)
+    reason_summary = summarize_reasons(results)
     failed_cases = [r for r in results if is_failed_case(r)]
-    successes = [r for r in results if not r.get("error")]
-    high_latency = sorted(successes, key=lambda r: float(r.get("latency_ms") or 0), reverse=True)[:10]
-    citation_rate = _percent(summary["citation_supported"], summary["citation_total"])
+    high_latency = sorted(results, key=lambda r: float(r.get("latency_ms") or 0), reverse=True)[:10]
+    citation_rate = _rate_percent(summary["citation_supported_rate"])
 
     lines = [
         "# RAG 评测报告",
@@ -497,39 +565,72 @@ def build_report(results: list[dict[str, Any]], base_url: str) -> str:
         f"| total | {summary['total']} |",
         f"| success | {summary['successes']} |",
         f"| errors | {summary['errors']} |",
-        f"| hit_expected_laws | {_percent(summary['law_hits'], summary['law_total'])} |",
-        f"| hit_expected_articles | {_percent(summary['article_hits'], summary['article_total'])} |",
+        f"| expected_law_hit_rate | {_rate_percent(summary['expected_law_hit_rate'])} ({summary['law_hits']}/{summary['law_total']}) |",
+        f"| expected_article_hit_rate | {_rate_percent(summary['expected_article_hit_rate'])} ({summary['article_hits']}/{summary['article_total']}) |",
         f"| citation_supported_rate | {citation_rate} |",
+        f"| domain_hit_rate | {_rate_percent(summary['domain_hit_rate'])} ({summary['domain_hits']}/{summary['domain_total']}) |",
         f"| avg_latency_ms | {summary['avg_latency_ms']} |",
         f"| p95_latency_ms | {summary['p95_latency_ms']} |",
         f"| error_rate | {summary['error_rate']} |",
-        f"| domain_accuracy | {_percent(summary['domain_hits'], summary['domain_total'])} |",
         "",
         "## 分领域表",
         "",
     ]
     if domain_summary:
-        lines.append("| domain | total | law_hit_rate | article_hit_rate | avg_latency_ms | failed_cases |")
-        lines.append("| --- | --- | --- | --- | --- | --- |")
+        lines.append("| domain | total | expected_law_hit_rate | expected_article_hit_rate | citation_supported_rate | domain_hit_rate | avg_latency_ms | p95_latency_ms | failed_cases |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for domain, row in domain_summary.items():
             failed = "、".join(row["failed_cases"][:10])
             if len(row["failed_cases"]) > 10:
                 failed += f" 等 {len(row['failed_cases'])} 条"
             lines.append(
-                f"| {_md_cell(domain)} | {row['total']} | {_percent(row['law_hits'], row['law_total'])} | "
-                f"{_percent(row['article_hits'], row['article_total'])} | {row['avg_latency_ms']} | {_md_cell(failed or '-')} |"
+                f"| {_md_cell(domain)} | {row['total']} | "
+                f"{_rate_percent(row['expected_law_hit_rate'])} | "
+                f"{_rate_percent(row['expected_article_hit_rate'])} | "
+                f"{_rate_percent(row['citation_supported_rate'])} | "
+                f"{_rate_percent(row['domain_hit_rate'])} | "
+                f"{row['avg_latency_ms']} | {row['p95_latency_ms']} | {_md_cell(failed or '-')} |"
             )
     else:
         lines.append("暂无分领域数据。")
 
+    lines.extend(["", "## 分难度表", ""])
+    if difficulty_summary:
+        lines.append("| difficulty | total | expected_law_hit_rate | expected_article_hit_rate | citation_supported_rate | domain_hit_rate | avg_latency_ms | p95_latency_ms |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        for difficulty, row in difficulty_summary.items():
+            lines.append(
+                f"| {_md_cell(difficulty)} | {row['total']} | "
+                f"{_rate_percent(row['expected_law_hit_rate'])} | "
+                f"{_rate_percent(row['expected_article_hit_rate'])} | "
+                f"{_rate_percent(row['citation_supported_rate'])} | "
+                f"{_rate_percent(row['domain_hit_rate'])} | "
+                f"{row['avg_latency_ms']} | {row['p95_latency_ms']} |"
+            )
+    else:
+        lines.append("暂无分难度数据。")
+
+    lines.extend(["", "## 失败归因统计", ""])
+    if reason_summary:
+        lines.append("| reason | count |")
+        lines.append("| --- | --- |")
+        for reason, count in reason_summary.items():
+            lines.append(f"| `{_md_cell(reason)}` | {count} |")
+    else:
+        lines.append("暂无失败归因。")
+
     lines.extend(["", "## 失败样例列表", ""])
     if failed_cases:
-        lines.append("| id | question | expected_laws | actual_sources | error / miss reason |")
-        lines.append("| --- | --- | --- | --- | --- |")
+        lines.append("| id | domain | difficulty | reason | question | expected_laws | expected_articles | actual_sources | error / miss reason |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for row in failed_cases[:30]:
             lines.append(
-                f"| {_md_cell(row.get('id'))} | {_md_cell(_truncate(row.get('question')))} | "
+                f"| {_md_cell(row.get('id'))} | {_md_cell(row.get('expected_domain') or row.get('domain'))} | "
+                f"{_md_cell(row.get('difficulty') or '未标注')} | "
+                f"{_md_cell('、'.join(row.get('reasons') or []))} | "
+                f"{_md_cell(_truncate(row.get('question')))} | "
                 f"{_md_cell('、'.join(row.get('expected_laws') or []))} | "
+                f"{_md_cell('、'.join(row.get('expected_articles') or []))} | "
                 f"{_md_cell('、'.join(row.get('actual_sources') or []))} | "
                 f"{_md_cell(row.get('error') or row.get('miss_reason'))} |"
             )
@@ -548,6 +649,9 @@ def build_report(results: list[dict[str, Any]], base_url: str) -> str:
     else:
         lines.append("暂无高延迟样例。")
 
+    lines.extend(["", "## 简短优化建议", ""])
+    lines.extend(build_suggestions(summary, reason_summary))
+
     lines.extend([
         "",
         "## 说明",
@@ -556,9 +660,29 @@ def build_report(results: list[dict[str, Any]], base_url: str) -> str:
         "- `expected_laws` 命中只表示 sources 中出现了期望法律名称，不等价于完整回答正确。",
         "- `expected_articles` 缺省时不参与条文命中率分母，以兼容旧 questions.jsonl。",
         "- `citation_supported_rate` 只检查回答中显式法名+条号引用是否能在 sources 中找到。",
+        "- `reason` / `reasons` 是规则归因，可能同时出现多个原因，例如召回条文缺失并伴随领域错误。",
         "- 若后端未启动或模型 Key 未配置，结果会记录为错误样例。",
     ])
     return "\n".join(lines) + "\n"
+
+
+def build_suggestions(summary: dict[str, Any], reason_summary: dict[str, int]) -> list[str]:
+    suggestions: list[str] = []
+    if reason_summary.get("retrieval_law_miss"):
+        suggestions.append("- 优先检查未命中法律对应的数据是否已入库，再看 BM25 / Vector / RRF 候选池是否过窄。")
+    if reason_summary.get("retrieval_article_miss"):
+        suggestions.append("- 条文级缺失较多时，检查条号解析、相邻条文扩展和最终上下文选择是否把目标条文挤出。")
+    if reason_summary.get("citation_unsupported"):
+        suggestions.append("- 引用不被 sources 支持时，收紧生成提示词，并检查引用后处理是否正确保留法名和条号。")
+    if reason_summary.get("domain_mismatch"):
+        suggestions.append("- 领域错误较多时，补充分类关键词或扩大多域拆解触发条件，尤其关注跨领域问题。")
+    if reason_summary.get("timeout_or_latency_high") or float(summary.get("p95_latency_ms") or 0) > DEFAULT_LATENCY_THRESHOLD_MS:
+        suggestions.append("- 长尾延迟偏高时，拆分检索、Rerank、生成阶段耗时，优先调小候选池或启用缓存回归。")
+    if reason_summary.get("api_error"):
+        suggestions.append("- API 错误样例优先看后端日志、模型 Key、超时和服务启动状态，避免把运行错误误判为 RAG 质量问题。")
+    if not suggestions:
+        suggestions.append("- 当前规则指标未发现明显失败，建议继续扩大跨领域、长案情和条文级样本覆盖。")
+    return suggestions
 
 
 def parse_args() -> argparse.Namespace:
@@ -569,6 +693,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT, help="Markdown 报告输出路径")
     parser.add_argument("--timeout", type=float, default=60.0, help="单题请求超时时间，单位秒")
     parser.add_argument("--api-key", default="", help="CHAT_API_KEY，未启用鉴权时留空")
+    parser.add_argument(
+        "--latency-threshold-ms",
+        type=float,
+        default=DEFAULT_LATENCY_THRESHOLD_MS,
+        help="超过该端到端耗时的样例会标记为 timeout_or_latency_high",
+    )
     return parser.parse_args()
 
 
