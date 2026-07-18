@@ -28,7 +28,11 @@ def main():
     logger.info("  法律顾问 Agent 启动中...")
     logger.info("=" * 60)
 
-    context = build_app_context(settings)
+    try:
+        context = build_app_context(settings)
+    except Exception:
+        logger.exception("应用初始化失败，请检查上方启动阶段日志和 .env 配置")
+        raise
 
     api.rag_chain = context.rag_chain
     api.retriever = context.retriever
@@ -45,7 +49,11 @@ def main():
     logger.info("  API 文档: http://localhost:%d/docs", port)
     logger.info("=" * 60)
 
-    uvicorn.run(api.app, host="0.0.0.0", port=port)
+    try:
+        uvicorn.run(api.app, host="0.0.0.0", port=port)
+    except Exception:
+        logger.exception("FastAPI 服务启动失败，请检查端口占用、网络绑定和运行环境")
+        raise
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# --- 测试 / 覆盖率 ---
+pytest>=9.0,<10.0
+pytest-cov>=7.0,<8.0

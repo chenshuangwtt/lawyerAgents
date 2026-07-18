@@ -1,242 +1,46 @@
 # 部署说明
 
-本文说明 lawyerAgents 的本地开发启动、环境变量、模型配置、数据库配置、向量库持久化和生产环境注意事项。
+本文说明 lawyerAgents 的本地启动、Docker Compose 启动、环境变量、数据挂载、首次向量库构建、健康检查和常见问题。
 
-## 1. 本地开发启动
+## 1. 推荐环境
 
-### Python 版本
+- Python：推荐 3.11。项目的 Dockerfile 使用 `python:3.11-slim-bookworm`，`pyproject.toml` 也约束为 Python 3.11 系列。
+- 包管理：普通本地开发推荐使用 `uv`；也保留 `pip install -r requirements.txt` 方式。
+- Node.js：前端使用 `pnpm`。
 
-推荐使用 Python 3.11。仓库根目录提供 `.python-version`，内容为：
+## 2. 本地启动
 
-```text
-3.11
+复制配置模板：
+
+```powershell
+copy .env.example .env
 ```
 
-使用 uv 时可以按以下方式创建虚拟环境：
+编辑 `.env`，至少配置当前 provider 所需的模型 Key。例如默认配置为：
+
+```env
+LLM_PROVIDER=qwen
+EMBEDDING_PROVIDER=qwen
+QWEN_API_KEY=你的 DashScope Key
+```
+
+使用 uv：
 
 ```powershell
 uv python install 3.11
 uv venv .venv --python 3.11
+uv pip install -r requirements.txt
+uv run python run.py
 ```
 
-如果 `uv venv` 创建的环境没有 pip，可执行：
-
-```powershell
-.venv\Scripts\python.exe -m ensurepip --upgrade
-```
-
-### 后端
+使用 pip：
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe run.py
 ```
 
-默认后端地址通常为：
-
-```text
-http://localhost:9000
-```
-
-### 前端
-
-```powershell
-cd frontend
-pnpm install
-pnpm run dev
-```
-
-默认前端地址通常为：
-
-```text
-http://localhost:3000
-```
-
-如果 3000 端口已被占用，Vite 会自动尝试 3001、3002 等后续端口，请以控制台输出为准。
-
-## 1.1 国内镜像源
-
-如果本地网络访问 PyPI、Debian apt 或 Hugging Face 较慢，建议使用国内镜像源。
-
-### Python 依赖
-
-本地安装可指定 PyPI 镜像：
-
-```powershell
-.venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-```
-
-也可以在环境变量中配置：
-
-```env
-PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-```
-
-### Hugging Face
-
-本地 Embedding 使用 Hugging Face 模型时，可配置：
-
-```env
-HF_ENDPOINT=https://hf-mirror.com
-HF_CACHE_DIR=./models_cache
-HF_HUB_DISABLE_XET=1
-```
-
-不要继续使用已废弃的 `HF_HUB_ENABLE_HF_TRANSFER`。如本机系统环境变量中残留该项，建议删除；项目启动时也会移除该变量，避免 `huggingface_hub` 输出废弃警告。`HF_HUB_DISABLE_XET=1` 用于禁用 Xet/CAS 下载路径，减少绕过 `HF_ENDPOINT` 的外部连接。
-
-### Docker 构建
-
-Dockerfile 默认使用以下国内镜像：
-
-- Debian apt：`https://mirrors.tuna.tsinghua.edu.cn`
-- PyPI：`https://pypi.tuna.tsinghua.edu.cn/simple`
-- Hugging Face：`https://hf-mirror.com`
-- Hugging Face Xet/CAS：默认禁用（`HF_HUB_DISABLE_XET=1`）
-
-如需覆盖：
-
-```powershell
-docker build `
-  --build-arg APT_MIRROR=https://mirrors.aliyun.com `
-  --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple `
-  --build-arg HF_ENDPOINT=https://hf-mirror.com `
-  -t lawyer-agents:local .
-```
-
-注意：Docker 基础镜像 `python:3.11-slim-bookworm` 的拉取源需要在 Docker Desktop / Docker daemon 中配置 registry mirror，Dockerfile 无法控制基础镜像下载地址。
-
-## 2. 环境变量
-
-项目使用 `.env` 管理本地配置。请复制模板：
-
-```powershell
-copy .env.example .env
-```
-
-然后按需填写模型 Key、数据库连接、限流、缓存和功能开关。完整字段请参考 `.env.example`。
-
-注意：
-
-- 不要提交 `.env`。
-- 不要在 README、Issue、日志或截图中暴露真实 API Key。
-- 生产环境应使用更严格的鉴权和 HTTPS 配置。
-
-## 3. 模型配置
-
-### Qwen / DashScope
-
-默认推荐使用 Qwen / DashScope：
-
-```env
-LLM_PROVIDER=qwen
-EMBEDDING_PROVIDER=qwen
-QWEN_API_KEY=
-QWEN_CHAT_MODEL=qwen3-max
-QWEN_EMBEDDING_MODEL=text-embedding-v4
-QWEN_RERANKER_MODEL=gte-rerank-v2
-```
-
-### DeepSeek
-
-DeepSeek 可作为 LLM 提供商使用。是否用于 Embedding 取决于实际 API 能力，配置时请以当前服务能力为准。
-
-```env
-LLM_PROVIDER=deepseek
-DEEPSEEK_API_KEY=
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_CHAT_MODEL=deepseek-chat
-```
-
-### OpenAI Compatible
-
-可通过 OpenAI Compatible API 接入兼容服务：
-
-```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=
-OPENAI_BASE_URL=https://api.openai.com
-OPENAI_CHAT_MODEL=gpt-4o
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-```
-
-## 4. 数据库配置
-
-默认可使用 SQLite，适合本地开发和演示。
-
-配置 `DATABASE_URL` 后可使用 PostgreSQL：
-
-```env
-DATABASE_URL=postgresql://user:password@localhost:5432/lawyer_agents
-```
-
-会话、反馈、语义缓存等数据需要持久化。生产环境建议使用 PostgreSQL 或可备份的持久化存储。
-
-## 5. 向量库持久化
-
-ChromaDB 持久化目录由 `CHROMA_PERSIST_DIR` 控制：
-
-```env
-CHROMA_PERSIST_DIR=./chroma_db
-DATA_DIR=./data
-```
-
-注意：
-
-- 法律文档变更后，需要重建或增量更新索引。
-- Embedding API 可能产生调用成本。
-- 大规模数据建议区分核心法条、司法解释、官方案例和历史案例，不要全部塞入同一主链路。
-
-## 6. 生产环境注意事项
-
-生产部署建议：
-
-- 配置 `CHAT_API_KEY`。
-- 配置 `ADMIN_API_KEY`。
-- 限制 `CORS_ORIGINS`。
-- 配置 Rate Limit。
-- 不要提交 `.env`。
-- 不要暴露模型 API Key。
-- 建议启用 HTTPS。
-- 日志中避免输出敏感信息。
-- 管理接口应只对可信网络或可信用户开放。
-
-## 7. Docker Compose 部署
-
-当前仓库提供 `docker-compose.yml`，用于本地启动后端 API 容器。前端仍按现有方式单独启动或独立部署。
-
-### 准备环境变量
-
-```powershell
-copy .env.example .env
-```
-
-编辑 `.env`，填入模型服务 Key。不要提交真实 `.env`。
-
-### 构建并启动
-
-```powershell
-docker compose up --build
-```
-
-后台运行：
-
-```powershell
-docker compose up -d --build
-```
-
-查看日志：
-
-```powershell
-docker compose logs -f lawyer-agents
-```
-
-停止服务：
-
-```powershell
-docker compose down
-```
-
-### 访问地址
+后端默认地址：
 
 ```text
 http://localhost:9000
@@ -248,27 +52,167 @@ http://localhost:9000
 http://localhost:9000/api/health
 ```
 
-### 数据持久化
+前端本地开发：
 
-Compose 使用 Docker named volumes 保存运行时数据：
+```powershell
+cd frontend
+pnpm install
+pnpm run dev
+```
 
-- `chroma_db`：向量库持久化目录。
-- `models_cache`：Hugging Face / 本地模型缓存。
-- `runtime_data`：SQLite、司法解释索引、案例运行时索引等。
-- `app_logs`：日志目录。
+## 3. 依赖安装建议
 
-项目本地 `data/` 会以只读方式挂载到容器内 `/app/data`，避免容器运行时修改原始知识库文件。
+`requirements.txt` 只列直接运行依赖，并为主要依赖设置了上界，降低依赖漂移风险。测试和覆盖率工具放在 `requirements-dev.txt`：
 
-### 镜像源
+```powershell
+uv pip install -r requirements-dev.txt
+uv run pytest
+```
 
-Compose 会复用 Dockerfile 默认的国内镜像源配置：
+如需完全可复现的 Python 环境，建议在更新依赖后使用 uv 生成或刷新 lock 文件：
+
+```powershell
+uv lock
+uv sync --locked
+```
+
+如果只是部署服务，优先安装 `requirements.txt`，不要把测试依赖装进生产镜像。
+
+## 4. Docker Compose 启动
+
+准备 `.env`：
+
+```powershell
+copy .env.example .env
+```
+
+启动：
+
+```powershell
+docker compose up --build
+```
+
+后台启动：
+
+```powershell
+docker compose up -d --build
+```
+
+查看日志：
+
+```powershell
+docker compose logs -f lawyer-agents
+```
+
+查看健康状态：
+
+```powershell
+docker compose ps
+```
+
+停止：
+
+```powershell
+docker compose down
+```
+
+服务地址：
+
+```text
+http://localhost:9000
+```
+
+## 5. Docker 健康检查
+
+`docker-compose.yml` 为 `lawyer-agents` 服务配置了 healthcheck。检查命令使用 Python 标准库访问：
+
+```text
+http://127.0.0.1:9000/api/health
+```
+
+不依赖镜像内安装 `curl`。默认参数：
+
+- `interval: 30s`
+- `timeout: 5s`
+- `retries: 5`
+- `start_period: 120s`
+
+首次构建向量库或下载本地模型时启动较慢，`start_period` 用于避免容器刚启动就被判为 unhealthy。
+
+Dockerfile 也保留了镜像级 `HEALTHCHECK`，单容器运行时同样可用。
+
+## 6. API Key 配置
+
+启动时会检查当前 provider 所需的 API Key：
+
+- `LLM_PROVIDER=qwen` 或 `EMBEDDING_PROVIDER=qwen`：需要 `QWEN_API_KEY`
+- `LLM_PROVIDER=deepseek` 或 `EMBEDDING_PROVIDER=deepseek`：需要 `DEEPSEEK_API_KEY`
+- `LLM_PROVIDER=openai/openai_compatible` 或 `EMBEDDING_PROVIDER=openai/openai_compatible`：需要 `OPENAI_API_KEY`
+
+接口鉴权：
+
+- `CHAT_API_KEY`：聊天和会话写接口鉴权；留空表示本地开发不鉴权。
+- `ADMIN_API_KEY`：配置和 metrics 管理接口鉴权；生产环境必须配置。
+
+生产建议：
+
+- 设置 `APP_ENV=production`
+- 设置 `ALLOW_INSECURE_LOCAL=false`
+- 配置 HTTPS / 反向代理
+- 限制 `CORS_ORIGINS`
+
+## 7. 数据目录与挂载
+
+关键目录：
+
+- `DATA_DIR`：法律资料目录，默认 `./data`
+- `CHROMA_PERSIST_DIR`：ChromaDB 向量库目录，默认 `./chroma_db`
+- `APP_DB_PATH`：SQLite 会话、反馈、语义缓存数据库
+- `INTERPRETATION_DB_PATH`：司法解释按需检索索引
+- `CASE_LANCEDB_DIR`：案例语义检索运行时索引
+
+Compose 挂载：
+
+- `./data:/app/data:ro`：只读挂载原始知识库，避免容器修改本地资料
+- `chroma_db:/app/chroma_db`：向量库持久化
+- `models_cache:/app/models_cache`：Hugging Face / 本地模型缓存
+- `runtime_data:/app/runtime`：SQLite 和运行时索引
+- `app_logs:/app/logs`：日志
+
+## 8. 向量库首次构建
+
+首次启动会执行：
+
+```text
+[1/8] 初始化问答记录数据库
+[2/8] 创建 Embedding 模型
+[3/8] 加载法律文书
+[4/8] 准备向量库
+[5/8] 构建法条条号索引
+[6/8] 创建 Reranker
+[7/8] 创建 LLM 并构建 RAG 链
+[8/8] 启动 FastAPI 服务
+```
+
+首次构建向量库需要调用 embedding 模型，可能耗时较长并产生 API 调用成本。后续启动会复用 `CHROMA_PERSIST_DIR` 中的持久化索引。
+
+如果更新了 `DATA_DIR`、embedding 模型、切分策略或索引策略，建议同步更新：
+
+```env
+INDEX_VERSION=新的索引版本
+```
+
+这样语义缓存不会误命中旧索引下的答案。
+
+## 9. 国内镜像源
+
+Dockerfile 默认使用：
 
 - Debian apt：`https://mirrors.tuna.tsinghua.edu.cn`
 - PyPI：`https://pypi.tuna.tsinghua.edu.cn/simple`
 - Hugging Face：`https://hf-mirror.com`
-- Hugging Face Xet/CAS：默认禁用（`HF_HUB_DISABLE_XET=1`）
 
-可以通过环境变量覆盖：
+覆盖示例：
 
 ```powershell
 $env:APT_MIRROR="https://mirrors.aliyun.com"
@@ -277,13 +221,57 @@ $env:HF_ENDPOINT="https://hf-mirror.com"
 docker compose build
 ```
 
-注意：基础镜像 `python:3.11-slim-bookworm` 的拉取源仍需在 Docker Desktop / Docker daemon 中配置 registry mirror。
+基础镜像 `python:3.11-slim-bookworm` 的拉取源需要在 Docker Desktop / Docker daemon 中配置 registry mirror，Dockerfile 无法控制。
 
-### 后续生产化方向
+## 10. 常见问题
 
-后续可继续扩展：
+### 启动时报缺少 API Key
 
-- 独立前端静态服务或 Nginx。
-- PostgreSQL 服务。
-- HTTPS / 反向代理。
-- 更细粒度的健康检查和日志采集。
+检查 `.env` 中的 provider 和 key 是否匹配。例如使用默认 Qwen 时，`QWEN_API_KEY` 必须填写。
+
+### 服务长时间 unhealthy
+
+查看日志：
+
+```powershell
+docker compose logs -f lawyer-agents
+```
+
+常见原因包括：首次构建向量库耗时、Embedding API Key 无效、网络无法访问模型服务、`data/` 目录为空或挂载错误。
+
+### Rerank 不生效
+
+`ENABLE_RERANK=true` 时远程 rerank 默认使用 Qwen/DashScope 的 `QWEN_API_KEY`。如果未配置该 key，系统会提示远程 Rerank 不可用，并在精排阶段返回原始候选顺序。需要本地 fallback 时，可配置：
+
+```env
+ENABLE_LOCAL_RERANKER_FALLBACK=true
+LOCAL_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+```
+
+### 本地模型下载慢
+
+配置：
+
+```env
+HF_ENDPOINT=https://hf-mirror.com
+HF_HUB_DISABLE_XET=1
+HF_CACHE_DIR=./models_cache
+```
+
+### 修改配置后没有生效
+
+`.env` 修改后需要重启服务。Docker Compose 场景下：
+
+```powershell
+docker compose up -d --build
+```
+
+### 端口冲突
+
+修改 `.env`：
+
+```env
+HOST_PORT=9001
+```
+
+然后重新启动。Compose 会映射为 `${HOST_PORT}:9000`，容器内仍固定监听 9000。本地直接运行 `run.py` 时使用 `PORT` 控制监听端口。

@@ -21,6 +21,53 @@ from app.vectorstore import get_or_create_vectorstore
 logger = logging.getLogger(__name__)
 
 
+def _run_bootstrap_step(label: str, fn):
+    """Run one startup step with a clear failure boundary."""
+    try:
+        return fn()
+    except Exception:
+        logger.exception("%s 失败，服务启动中止", label)
+        raise
+
+
+def _require_api_key(settings: Settings, provider: str, key_name: str, value: str, usage: str) -> None:
+    if not str(value or "").strip():
+        raise RuntimeError(
+            f"{usage} 选择了 {provider}，但 {key_name} 未配置。请在 .env 中填写 {key_name}，"
+            "或切换到可用的 provider。"
+        )
+
+
+def validate_startup_config(settings: Settings) -> None:
+    """Fail early for required model keys and warn for optional security keys."""
+    llm_provider = settings.llm_provider.lower()
+    embedding_provider = settings.embedding_provider.lower()
+
+    if llm_provider == "qwen":
+        _require_api_key(settings, "qwen", "QWEN_API_KEY", settings.qwen_api_key, "LLM_PROVIDER")
+    elif llm_provider == "deepseek":
+        _require_api_key(settings, "deepseek", "DEEPSEEK_API_KEY", settings.deepseek_api_key, "LLM_PROVIDER")
+    elif llm_provider in {"openai", "openai_compatible"}:
+        _require_api_key(settings, llm_provider, "OPENAI_API_KEY", settings.openai_api_key, "LLM_PROVIDER")
+
+    if embedding_provider == "qwen":
+        _require_api_key(settings, "qwen", "QWEN_API_KEY", settings.qwen_api_key, "EMBEDDING_PROVIDER")
+    elif embedding_provider == "deepseek":
+        _require_api_key(settings, "deepseek", "DEEPSEEK_API_KEY", settings.deepseek_api_key, "EMBEDDING_PROVIDER")
+    elif embedding_provider in {"openai", "openai_compatible"}:
+        _require_api_key(settings, embedding_provider, "OPENAI_API_KEY", settings.openai_api_key, "EMBEDDING_PROVIDER")
+
+    if settings.enable_rerank and not settings.qwen_api_key and not settings.enable_local_reranker_fallback:
+        logger.warning(
+            "ENABLE_RERANK=true 但 QWEN_API_KEY 未配置，远程 Rerank 不可用；"
+            "当前会在精排阶段返回原始候选顺序。"
+        )
+    if not settings.chat_api_key:
+        logger.warning("CHAT_API_KEY 未设置，聊天写接口当前不鉴权；生产环境建议配置。")
+    if not settings.admin_api_key:
+        logger.warning("ADMIN_API_KEY 未设置，管理接口将拒绝访问；生产环境必须配置。")
+
+
 def build_app_context(
     settings: Settings,
     *,
@@ -34,76 +81,106 @@ def build_app_context(
     ``run.py`` uses this for the web server; eval scripts use the same path so
     retrieval measurements match the application as closely as possible.
     """
+    validate_startup_config(settings)
+
     if init_database:
         logger.info("[1/8] 初始化问答记录数据库...")
-        init_db()
+        _run_bootstrap_step("[1/8] 初始化问答记录数据库", init_db)
 
     logger.info("[2/8] 创建 Embedding 模型 (provider=%s)...", settings.embedding_provider)
-    embeddings = create_embeddings(settings)
+    embeddings = _run_bootstrap_step(
+        "[2/8] 创建 Embedding 模型",
+        lambda: create_embeddings(settings),
+    )
 
     logger.info(
         "[3/8] 加载法律文书 (data_dir=%s, exclude=%s)...",
         settings.data_dir,
         settings.data_exclude_dirs,
     )
-    raw_docs = load_documents(settings.data_dir, exclude_dirs=settings.data_exclude_dirs)
-    chunks = split_documents(raw_docs, settings.chunk_size, settings.chunk_overlap)
+    raw_docs = _run_bootstrap_step(
+        "[3/8] 加载法律文书",
+        lambda: load_documents(settings.data_dir, exclude_dirs=settings.data_exclude_dirs),
+    )
+    chunks = _run_bootstrap_step(
+        "[3/8] 切分法律文书",
+        lambda: split_documents(raw_docs, settings.chunk_size, settings.chunk_overlap),
+    )
 
     logger.info("[4/8] 准备向量库 (persist_dir=%s)...", settings.chroma_persist_dir)
-    vectorstore = get_or_create_vectorstore(
-        chunks,
-        embeddings,
-        settings.chroma_persist_dir,
-        settings.data_dir,
-        exclude_dirs=settings.data_exclude_dirs,
+    vectorstore = _run_bootstrap_step(
+        "[4/8] 准备向量库",
+        lambda: get_or_create_vectorstore(
+            chunks,
+            embeddings,
+            settings.chroma_persist_dir,
+            settings.data_dir,
+            exclude_dirs=settings.data_exclude_dirs,
+        ),
     )
 
     logger.info("[5/8] 构建法条条号索引...")
-    article_index = build_article_index(chunks)
+    article_index = _run_bootstrap_step(
+        "[5/8] 构建法条条号索引",
+        lambda: build_article_index(chunks),
+    )
 
     reranker = None
     if settings.enable_rerank:
         logger.info("[6/8] 创建 Reranker (model=%s)...", settings.qwen_reranker_model)
-        reranker = CrossEncoderReranker(
-            api_key=settings.qwen_api_key,
-            model=settings.qwen_reranker_model,
-            local_model=settings.local_reranker_model,
-            enable_local_fallback=settings.enable_local_reranker_fallback,
+        reranker = _run_bootstrap_step(
+            "[6/8] 创建 Reranker",
+            lambda: CrossEncoderReranker(
+                api_key=settings.qwen_api_key,
+                model=settings.qwen_reranker_model,
+                local_model=settings.local_reranker_model,
+                enable_local_fallback=settings.enable_local_reranker_fallback,
+            ),
         )
     else:
         logger.info("[6/8] Rerank 已禁用，跳过")
 
     logger.info("[7/8] 创建 LLM (provider=%s) 并构建 RAG 链...", settings.llm_provider)
-    llm = create_chat_model(settings)
-    lightweight_llm = create_lightweight_llm(settings)
-    chain, retriever, llm, _bm25_retriever, components = build_rag_chain(
-        vectorstore,
-        llm,
-        chunks,
-        article_index,
-        reranker=reranker,
-        lightweight_llm=lightweight_llm,
-        top_k=settings.retriever_top_k,
-        bm25_top_k=settings.bm25_top_k,
-        bm25_per_law_k=settings.bm25_per_law_k,
-        vector_top_k=settings.vector_top_k,
-        rerank_top_k=settings.rerank_top_k,
-        rerank_final_k=settings.rerank_final_k,
-        rrf_constant=settings.rrf_constant,
-        enable_source_coverage_selection=settings.enable_source_coverage_selection,
-        source_coverage_candidate_k=settings.source_coverage_candidate_k,
-        source_coverage_max_sources=settings.source_coverage_max_sources,
-        source_coverage_per_source=settings.source_coverage_per_source,
-        adjacent_range=settings.adjacent_range,
-        enable_classification=settings.enable_classification,
-        memory_keep_recent_rounds=settings.memory_keep_recent_rounds,
-        memory_summary_trigger_rounds=settings.memory_summary_trigger_rounds,
-        memory_summary_max_chars=settings.memory_summary_max_chars,
-        memory_history_max_tokens=settings.memory_history_max_tokens,
-        memory_compression_debug=settings.memory_compression_debug,
+    llm = _run_bootstrap_step("[7/8] 创建 LLM", lambda: create_chat_model(settings))
+    lightweight_llm = _run_bootstrap_step("[7/8] 创建轻量 LLM", lambda: create_lightweight_llm(settings))
+    chain, retriever, llm, _bm25_retriever, components = _run_bootstrap_step(
+        "[7/8] 构建 RAG 链",
+        lambda: build_rag_chain(
+            vectorstore,
+            llm,
+            chunks,
+            article_index,
+            reranker=reranker,
+            lightweight_llm=lightweight_llm,
+            top_k=settings.retriever_top_k,
+            bm25_top_k=settings.bm25_top_k,
+            bm25_per_law_k=settings.bm25_per_law_k,
+            vector_top_k=settings.vector_top_k,
+            rerank_top_k=settings.rerank_top_k,
+            rerank_final_k=settings.rerank_final_k,
+            rrf_constant=settings.rrf_constant,
+            enable_source_coverage_selection=settings.enable_source_coverage_selection,
+            source_coverage_candidate_k=settings.source_coverage_candidate_k,
+            source_coverage_max_sources=settings.source_coverage_max_sources,
+            source_coverage_per_source=settings.source_coverage_per_source,
+            adjacent_range=settings.adjacent_range,
+            enable_authority_weighting=settings.enable_authority_weighting,
+            authority_boost_factor=settings.authority_boost_factor,
+            enable_classification=settings.enable_classification,
+            memory_keep_recent_rounds=settings.memory_keep_recent_rounds,
+            memory_summary_trigger_rounds=settings.memory_summary_trigger_rounds,
+            memory_summary_max_chars=settings.memory_summary_max_chars,
+            memory_history_max_tokens=settings.memory_history_max_tokens,
+            memory_compression_debug=settings.memory_compression_debug,
+        ),
     )
 
     _configure_interpretation_retrieval(settings, components)
+    components["enable_qa_cache"] = settings.enable_qa_cache
+    components["enable_analysis_cache"] = settings.enable_analysis_cache
+    components["enable_document_cache"] = settings.enable_document_cache
+    components["index_version"] = settings.index_version
+    components["policy_version"] = settings.policy_version
     if include_graph:
         _configure_graph(settings, retriever, llm, lightweight_llm, components)
     if include_analysis_graph:

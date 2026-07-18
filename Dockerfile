@@ -50,7 +50,7 @@ USER appuser
 
 EXPOSE 9000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 \
     CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"PORT\", \"9000\")}/api/health', timeout=3).read()" || exit 1
 
 CMD ["python", "run.py"]

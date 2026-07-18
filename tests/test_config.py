@@ -85,6 +85,11 @@ def test_settings_reads_database_and_cache_env(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/lawyer_agents")
     monkeypatch.setenv("APP_DB_PATH", str(db_path))
     monkeypatch.setenv("ENABLE_SEMANTIC_CACHE", "false")
+    monkeypatch.setenv("ENABLE_QA_CACHE", "false")
+    monkeypatch.setenv("ENABLE_ANALYSIS_CACHE", "true")
+    monkeypatch.setenv("ENABLE_DOCUMENT_CACHE", "true")
+    monkeypatch.setenv("INDEX_VERSION", "idx-test")
+    monkeypatch.setenv("POLICY_VERSION", "policy-test")
     monkeypatch.setenv("SEMANTIC_CACHE_THRESHOLD", "0.81")
     monkeypatch.setenv("SEMANTIC_CACHE_TTL", "24")
 
@@ -93,6 +98,11 @@ def test_settings_reads_database_and_cache_env(monkeypatch, tmp_path):
     assert settings.database_url == "postgresql://user:pass@localhost:5432/lawyer_agents"
     assert settings.app_db_path == str(db_path)
     assert settings.enable_semantic_cache is False
+    assert settings.enable_qa_cache is False
+    assert settings.enable_analysis_cache is True
+    assert settings.enable_document_cache is True
+    assert settings.index_version == "idx-test"
+    assert settings.policy_version == "policy-test"
     assert settings.semantic_cache_threshold == 0.81
     assert settings.semantic_cache_ttl == 24
 
@@ -118,3 +128,35 @@ def test_hot_config_contains_expected_runtime_fields(monkeypatch):
     assert hot_config["analysis_retrieval_top_k"] == 6
     assert "enable_source_coverage_selection" in hot_config
     assert "admin_api_key" not in hot_config
+
+
+def test_startup_config_requires_selected_provider_key(monkeypatch):
+    from app.bootstrap import validate_startup_config
+
+    monkeypatch.setenv("LLM_PROVIDER", "qwen")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+
+    settings = Settings()
+
+    try:
+        validate_startup_config(settings)
+    except RuntimeError as exc:
+        assert "QWEN_API_KEY" in str(exc)
+        assert "LLM_PROVIDER" in str(exc)
+    else:
+        raise AssertionError("validate_startup_config should fail when selected provider key is missing")
+
+
+def test_startup_config_allows_local_embedding_without_remote_embedding_key(monkeypatch):
+    from app.bootstrap import validate_startup_config
+
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    settings = Settings()
+
+    validate_startup_config(settings)

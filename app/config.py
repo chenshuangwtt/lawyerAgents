@@ -209,6 +209,13 @@ class Settings:
     enable_rerank: bool = field(
         default_factory=lambda: os.getenv("ENABLE_RERANK", "true").lower() == "true"
     )
+    # 来源权威轻量加权：仅在 Rerank 后对相近候选做温和排序倾斜。
+    enable_authority_weighting: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_AUTHORITY_WEIGHTING", "true").lower() == "true"
+    )
+    authority_boost_factor: float = field(
+        default_factory=lambda: float(os.getenv("AUTHORITY_BOOST_FACTOR", "0.08"))
+    )
     # 是否启用问题分类：关闭后对所有法律统一检索（不区分领域）
     enable_classification: bool = field(
         default_factory=lambda: os.getenv("ENABLE_CLASSIFICATION", "true").lower() == "true"
@@ -331,6 +338,21 @@ class Settings:
     enable_semantic_cache: bool = field(
         default_factory=lambda: os.getenv("ENABLE_SEMANTIC_CACHE", "true").lower() == "true"
     )
+    enable_qa_cache: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_QA_CACHE", "true").lower() == "true"
+    )
+    enable_analysis_cache: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_ANALYSIS_CACHE", "false").lower() == "true"
+    )
+    enable_document_cache: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_DOCUMENT_CACHE", "false").lower() == "true"
+    )
+    index_version: str = field(
+        default_factory=lambda: os.getenv("INDEX_VERSION", "legal-article-split-v2")
+    )
+    policy_version: str = field(
+        default_factory=lambda: os.getenv("POLICY_VERSION", os.getenv("APP_VERSION", "1.0.0"))
+    )
     semantic_cache_threshold: float = field(
         default_factory=lambda: float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.92"))
     )
@@ -399,7 +421,9 @@ class Settings:
         "enable_case_retrieval", "case_top_k",
         "use_official_cases", "use_legacy_cases", "official_case_top_k", "official_case_min_score", "legacy_case_top_k",
         "multi_domain_max_domains",
-        "enable_semantic_cache", "semantic_cache_threshold",
+        "enable_semantic_cache", "enable_qa_cache", "enable_analysis_cache",
+        "enable_document_cache", "index_version", "policy_version",
+        "semantic_cache_threshold",
         "enable_case_analysis", "analysis_max_claims", "analysis_retrieval_top_k",
         "sse_keepalive_seconds", "llm_timeout_seconds",
     }
