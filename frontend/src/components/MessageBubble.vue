@@ -20,7 +20,9 @@ const props = defineProps({
   substeps: { type: Array, default: () => [] },
   intent: { type: String, default: '' },
   case_state: { type: [Object, Array], default: null },
+  analysis_result: { type: [Object, String], default: null },
   document_result: { type: Object, default: null },
+  document_type: { type: String, default: '' },
   document_markdown: { type: String, default: '' },
   missing_fields: { type: Array, default: () => [] },
   clarification_questions: { type: Array, default: () => [] },
@@ -38,7 +40,9 @@ const clickedActionKeys = ref(new Set())
 
 const docTypes = [
   { type: 'labor_arbitration_application', label: '劳动仲裁申请书' },
+  { type: 'labor_arbitration', label: '劳动仲裁申请书' },
 ]
+const DOC_PLACEHOLDER = '【待补充】'
 
 const LABOR_CASE_KEYWORDS = [
   '劳动',
@@ -167,8 +171,64 @@ watch(
 
 const hasDocumentResult = computed(() => {
   return props.intent === 'document'
-    && !!props.document_result
-    && props.document_result.status !== 'unsupported'
+    && (!!props.document_result || !!props.document_markdown)
+    && props.document_result?.status !== 'unsupported'
+})
+
+function documentFieldLabel(key) {
+  for (const section of documentFieldSections) {
+    const found = section.fields.find(field => field[0] === key)
+    if (found) return found[1]
+  }
+  const labels = {
+    applicant_id: '公民身份号码',
+    claims: '仲裁请求',
+    facts_and_reasons: '事实与理由',
+    evidence_list: '证据目录',
+  }
+  return labels[key] || key
+}
+
+const documentTypeLabel = computed(() => {
+  const type = props.document_type || props.document_result?.document_type || props.document_result?.doc_type || ''
+  return docTypes.find(item => item.type === type)?.label || '法律文书'
+})
+
+const documentCanExport = computed(() => {
+  if (props.document_result && 'can_export' in props.document_result) return Boolean(props.document_result.can_export)
+  return Boolean(documentPreviewMarkdown.value)
+})
+
+const documentMissingDetails = computed(() => {
+  const details = props.document_result?.missing_field_details
+  if (Array.isArray(details) && details.length) {
+    return details.map(item => ({
+      name: item.display_name || documentFieldLabel(item.field_name),
+      question: item.question || '',
+      status: item.status || 'missing',
+      blocking: item.blocking !== false,
+    }))
+  }
+  const raw = props.missing_fields?.length ? props.missing_fields : props.document_result?.missing_fields || []
+  return raw.map(item => ({
+    name: documentFieldLabel(missingFieldName(item)),
+    question: '',
+    status: 'missing',
+    blocking: true,
+  })).filter(item => item.name)
+})
+
+const knownFieldRows = computed(() => {
+  const rows = []
+  for (const section of documentFieldSections) {
+    for (const [key, label] of section.fields) {
+      const value = editableDocFields.value[key]
+      if (value && String(value).trim()) {
+        rows.push({ key, label, value: String(value).trim() })
+      }
+    }
+  }
+  return rows.slice(0, 10)
 })
 function missingFieldName(item) {
   if (typeof item === 'string') return item
@@ -177,12 +237,23 @@ function missingFieldName(item) {
 
 const missingFieldSet = computed(() => {
   const raw = props.missing_fields?.length ? props.missing_fields : props.document_result?.missing_fields || []
-  return new Set(raw.map(missingFieldName).filter(Boolean))
+  const fromSlots = (props.document_result?.field_slots || [])
+    .filter(slot => slot?.blocking && ['missing', 'partial'].includes(slot?.status))
+    .map(slot => slot.field_name)
+  return new Set([...raw.map(missingFieldName), ...fromSlots].filter(Boolean))
+})
+
+const fieldStatusMap = computed(() => {
+  const status = { ...(props.document_result?.field_status || {}) }
+  for (const slot of props.document_result?.field_slots || []) {
+    if (slot?.field_name && slot?.status) status[slot.field_name] = slot.status
+  }
+  return status
 })
 
 function fieldValue(key) {
   const value = editableDocFields.value[key]
-  return value && String(value).trim() ? String(value) : '待补充'
+  return value && String(value).trim() ? String(value) : DOC_PLACEHOLDER
 }
 
 function fieldIsEmpty(key) {
@@ -195,6 +266,7 @@ function fieldIsRequiredMissing(key) {
 
 function fieldInputClass(key) {
   if (fieldIsRequiredMissing(key)) return 'border-red-300 bg-red-50 text-red-700 placeholder-red-300 focus:border-red-400 focus:ring-red-100'
+  if (['partial', 'uncertain'].includes(fieldStatusMap.value[key])) return 'border-amber-300 bg-amber-50/70 text-gray-700 placeholder-amber-400 focus:border-amber-300 focus:ring-amber-100'
   if (fieldIsEmpty(key)) return 'border-amber-200 bg-amber-50/60 text-gray-700 placeholder-amber-400 focus:border-amber-300 focus:ring-amber-100'
   return 'border-gray-200 bg-white text-gray-700 placeholder-gray-300 focus:border-blue-300 focus:ring-blue-100'
 }
@@ -204,21 +276,18 @@ function splitLines(value) {
 }
 
 function mdTableRow(label, value) {
-  const safe = String(value || '待补充').replace(/\|/g, '\\|').replace(/\n/g, '<br>')
+  const safe = String(value || DOC_PLACEHOLDER).replace(/\|/g, '\\|').replace(/\n/g, '<br>')
   return `| ${label} | ${safe} |`
 }
 
 function numberedTableValue(value) {
   const lines = splitLines(value)
-  if (!lines.length) return '待补充'
+  if (!lines.length) return DOC_PLACEHOLDER
   return lines.map((line, index) => `${index + 1}. ${line.replace(/\|/g, '\\|')}`).join('<br>')
 }
 
 function formatToday() {
-  const d = new Date()
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${d.getFullYear()}年${month}月${day}日`
+  return `${DOC_PLACEHOLDER}年${DOC_PLACEHOLDER}月${DOC_PLACEHOLDER}日`
 }
 
 function renderLaborPreviewMarkdown(fields) {
@@ -254,9 +323,9 @@ ${mdTableRow('联系电话', fieldValue('respondent_phone'))}
 
 | 项目 | 内容 |
 | --- | --- |
-${mdTableRow('请求 1', claims[0] || '待补充')}
-${mdTableRow('请求 2', claims[1] || '待补充')}
-${mdTableRow('请求 3', claims[2] || '待补充')}
+${mdTableRow('请求 1', claims[0] || DOC_PLACEHOLDER)}
+${mdTableRow('请求 2', claims[1] || DOC_PLACEHOLDER)}
+${mdTableRow('请求 3', claims[2] || DOC_PLACEHOLDER)}
 ${mdTableRow('仲裁请求计算公式', numberedTableValue(fields.claim_calculation_formula))}
 
 ## 四、基本事实和理由
@@ -282,7 +351,7 @@ ${mdTableRow('其他需要说明的事实和理由', numberedTableValue(fields.o
 
 ## 五、证据目录
 
-${splitLines(fields.evidence_list).map((item, index) => `${index + 1}. ${item}`).join('\n') || '1. 待补充'}
+${splitLines(fields.evidence_list).map((item, index) => `${index + 1}. ${item}`).join('\n') || `1. ${DOC_PLACEHOLDER}`}
 
 此致
 
@@ -322,6 +391,35 @@ function splitAnalysisSections(text) {
 }
 
 const analysisSections = computed(() => splitAnalysisSections(props.content))
+const structuredAnalysis = computed(() => normalizeAnalysisResult(
+  props.analysis_result || normalizedCaseState().analysis_result,
+))
+const hasAnalysisView = computed(() => {
+  return props.intent === 'analysis' || !!props.analysis_result || !!normalizedCaseState().analysis_result
+})
+const hasStructuredAnalysis = computed(() => {
+  const data = structuredAnalysis.value
+  return hasAnalysisView.value && !props.streaming && !!(
+    data.case_summary ||
+    data.risk_level !== 'unknown' ||
+    data.legal_relationships.length ||
+    data.claims.length ||
+    data.missing_information.length ||
+    data.evidence_checklist.length ||
+    data.next_actions.length ||
+    data.document_suggestions.length
+  )
+})
+const riskLevelInfo = computed(() => {
+  const level = structuredAnalysis.value.risk_level || 'unknown'
+  const meta = {
+    low: { label: '低', className: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
+    medium: { label: '中', className: 'bg-amber-50 text-amber-700 ring-amber-200' },
+    high: { label: '高', className: 'bg-red-50 text-red-700 ring-red-200' },
+    unknown: { label: '未知', className: 'bg-gray-100 text-gray-600 ring-gray-200' },
+  }
+  return meta[level] || meta.unknown
+})
 
 function normalizedCaseState() {
   let cs = props.case_state
@@ -331,10 +429,101 @@ function normalizedCaseState() {
   return cs && typeof cs === 'object' && !Array.isArray(cs) ? cs : {}
 }
 
+function normalizeAnalysisResult(value) {
+  let data = value
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data) } catch { data = null }
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return emptyAnalysisResult()
+  }
+  const possibleClaims = Array.isArray(data.possible_claims)
+    ? data.possible_claims.map(item => ({
+      claim: item?.claim_name || item?.claim || String(item || ''),
+      domain: item?.domain || '',
+      basis: normalizeBasis(item?.legal_basis),
+      supporting_facts: [],
+      missing_facts: normalizeList(item?.required_evidence),
+      risks: normalizeList(item?.risk_notes),
+      suggested_evidence: normalizeList(item?.required_evidence),
+    }))
+    : []
+  return {
+    case_summary: String(data.case_summary || ''),
+    case_type: String(data.case_type || ''),
+    risk_level: ['low', 'medium', 'high', 'unknown'].includes(data.risk_level) ? data.risk_level : 'unknown',
+    legal_relationships: normalizeList(data.legal_relationships),
+    claims: (Array.isArray(data.claims) ? data.claims : possibleClaims).map(normalizeAnalysisClaim).filter(item => item.claim),
+    evidence_checklist: normalizeList(data.evidence_checklist),
+    next_actions: normalizeList(data.next_actions),
+    missing_information: normalizeList(data.missing_information),
+    document_suggestions: normalizeList(data.document_suggestions),
+  }
+}
+
+function emptyAnalysisResult() {
+  return {
+    case_summary: '',
+    case_type: '',
+    risk_level: 'unknown',
+    legal_relationships: [],
+    claims: [],
+    evidence_checklist: [],
+    next_actions: [],
+    missing_information: [],
+    document_suggestions: [],
+  }
+}
+
+function normalizeAnalysisClaim(item) {
+  if (typeof item === 'string') {
+    return {
+      claim: item,
+      domain: '',
+      basis: [],
+      supporting_facts: [],
+      missing_facts: [],
+      risks: [],
+      suggested_evidence: [],
+    }
+  }
+  const raw = item && typeof item === 'object' ? item : {}
+  return {
+    claim: String(raw.claim || raw.claim_name || ''),
+    domain: String(raw.domain || ''),
+    basis: normalizeBasis(raw.basis || raw.legal_basis),
+    supporting_facts: normalizeList(raw.supporting_facts),
+    missing_facts: normalizeList(raw.missing_facts || raw.required_evidence),
+    risks: normalizeList(raw.risks || raw.risk_notes),
+    suggested_evidence: normalizeList(raw.suggested_evidence || raw.required_evidence),
+  }
+}
+
+function normalizeBasis(value) {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => {
+    if (typeof item === 'string') return { law_name: '', article_no: '', summary: item }
+    const raw = item && typeof item === 'object' ? item : {}
+    return {
+      law_name: String(raw.law_name || raw.title || raw.source || ''),
+      article_no: String(raw.article_no || ''),
+      summary: String(raw.summary || raw.content || raw.text || ''),
+    }
+  }).filter(item => item.law_name || item.article_no || item.summary)
+}
+
 function normalizeList(value) {
   if (!value) return []
   if (Array.isArray(value)) return value.map(v => String(v))
   return [String(value)]
+}
+
+function shortList(items, limit = 4) {
+  return normalizeList(items).slice(0, limit)
+}
+
+function claimEvidenceGap(claim) {
+  return shortList(claim.missing_facts?.length ? claim.missing_facts : claim.suggested_evidence)
 }
 
 function normalizeAvailableActions(value) {
@@ -373,7 +562,7 @@ function normalizeCaseAction(item) {
 }
 
 const availableCaseActions = computed(() => {
-  if (props.intent !== 'analysis' || props.streaming) return []
+  if (!hasAnalysisView.value || props.streaming) return []
   const cs = normalizedCaseState()
   const actions = normalizeAvailableActions(cs.available_actions)
   if (actions.length) return actions
@@ -431,6 +620,20 @@ async function copyDocumentMarkdown() {
   } catch {
     copiedPreview.value = false
   }
+}
+
+function downloadDocumentMarkdown() {
+  const markdown = documentPreviewMarkdown.value
+  if (!markdown) return
+  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${documentTypeLabel.value}.md`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 function actionKey(action) {
@@ -658,45 +861,93 @@ function toggleCase(ci) {
       <RagProgress :substeps="substeps" :streaming="streaming" />
 
       <!-- 文书结果：表单字段版 / 预览版 -->
-      <div v-if="hasDocumentResult" class="bg-gray-50 rounded-2xl rounded-tl-md px-5 py-4 text-sm leading-relaxed border border-gray-100">
-        <div class="flex items-center justify-between gap-3 mb-4">
-          <div class="inline-flex rounded-lg bg-white p-1 ring-1 ring-gray-200">
-            <button
-              class="px-3 py-1.5 rounded-md text-xs font-semibold transition-colors"
-              :class="docView === 'form' ? 'bg-blue-50 text-blue-600' : 'text-gray-500 hover:text-gray-700'"
-              @click="docView = 'form'"
-            >
-              表单字段版
-            </button>
-            <button
-              class="px-3 py-1.5 rounded-md text-xs font-semibold transition-colors"
-              :class="docView === 'preview' ? 'bg-blue-50 text-blue-600' : 'text-gray-500 hover:text-gray-700'"
-              @click="docView = 'preview'"
-            >
-              预览版
-            </button>
+      <div v-if="hasDocumentResult" class="bg-white rounded-2xl rounded-tl-md px-5 py-4 text-sm leading-relaxed border border-emerald-100 shadow-sm">
+        <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-xs font-semibold text-emerald-700">文书生成</span>
+              <span class="rounded-md bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-100">
+                {{ documentTypeLabel }}
+              </span>
+              <span
+                class="rounded-md px-2 py-0.5 text-[11px] font-medium ring-1"
+                :class="documentCanExport ? 'bg-blue-50 text-blue-700 ring-blue-100' : 'bg-amber-50 text-amber-700 ring-amber-100'"
+              >
+                {{ documentCanExport ? '可复制导出' : '需补充后导出' }}
+              </span>
+            </div>
+            <p class="mt-1 text-xs text-gray-500">
+              已按字段槽位提取案情，缺失内容在预览中保留为“【待补充】”。
+            </p>
           </div>
-          <div class="flex items-center gap-2">
+
+          <div class="flex flex-wrap items-center gap-2">
+            <div class="inline-flex rounded-lg bg-gray-50 p-1 ring-1 ring-gray-200">
+              <button
+                class="px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer"
+                :class="docView === 'form' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
+                @click="docView = 'form'"
+              >
+                字段
+              </button>
+              <button
+                class="px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer"
+                :class="docView === 'preview' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
+                @click="docView = 'preview'"
+              >
+                预览
+              </button>
+            </div>
             <button
-              v-if="(missing_fields?.length || document_result?.missing_fields?.length)"
-              class="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+              v-if="documentMissingDetails.length"
+              class="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors cursor-pointer"
               @click="continueDocumentFromForm"
             >
               使用表单内容继续生成
             </button>
             <button
               v-if="docView === 'preview'"
-              class="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white text-gray-500 ring-1 ring-gray-200 hover:text-blue-600 hover:ring-blue-200 transition-colors"
+              class="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white text-gray-500 ring-1 ring-gray-200 hover:text-blue-600 hover:ring-blue-200 transition-colors cursor-pointer"
               @click="copyDocumentMarkdown"
             >
               {{ copiedPreview ? '已复制' : '复制 Markdown' }}
             </button>
-            <span
-              v-if="(missing_fields?.length || document_result?.missing_fields?.length)"
-              class="text-xs font-medium text-red-500"
+            <button
+              v-if="docView === 'preview'"
+              class="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white text-gray-500 ring-1 ring-gray-200 hover:text-emerald-700 hover:ring-emerald-200 transition-colors cursor-pointer"
+              @click="downloadDocumentMarkdown"
             >
-              有字段待补充
-            </span>
+              下载 Markdown
+            </button>
+          </div>
+        </div>
+
+        <div class="mb-4 grid gap-2 sm:grid-cols-2">
+          <div v-if="documentMissingDetails.length" class="rounded-xl border border-red-100 bg-red-50 px-3 py-2.5">
+            <div class="text-xs font-semibold text-red-700">缺失字段</div>
+            <div class="mt-1 flex flex-wrap gap-1.5">
+              <span
+                v-for="item in documentMissingDetails.slice(0, 8)"
+                :key="`${item.name}-${item.question}`"
+                class="rounded-md bg-white px-2 py-0.5 text-[11px] font-medium text-red-600 ring-1 ring-red-100"
+                :title="item.question"
+              >
+                {{ item.name }}
+              </span>
+            </div>
+          </div>
+          <div v-if="knownFieldRows.length" class="rounded-xl border border-blue-100 bg-blue-50 px-3 py-2.5">
+            <div class="text-xs font-semibold text-blue-700">已知字段</div>
+            <div class="mt-1 flex flex-wrap gap-1.5">
+              <span
+                v-for="item in knownFieldRows.slice(0, 8)"
+                :key="item.key"
+                class="max-w-full truncate rounded-md bg-white px-2 py-0.5 text-[11px] font-medium text-blue-700 ring-1 ring-blue-100"
+                :title="`${item.label}：${item.value}`"
+              >
+                {{ item.label }}：{{ item.value }}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -705,7 +956,7 @@ function toggleCase(ci) {
             v-if="(missing_fields?.length || document_result?.missing_fields?.length)"
             class="rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-600"
           >
-            红色字段为生成文书前建议补充的关键信息；空白字段可先保留为“待补充”。
+            红色字段为生成文书前必须补充的关键信息；空白字段会在预览中保留为“【待补充】”。
           </div>
 
           <div
@@ -734,6 +985,7 @@ function toggleCase(ci) {
                   {{ field[1] }}
                   <span v-if="fieldIsRequiredMissing(field[0])">（必填）</span>
                   <span v-else-if="fieldIsEmpty(field[0])">（待补充）</span>
+                  <span v-else-if="['partial', 'uncertain'].includes(fieldStatusMap[field[0]])">（需确认）</span>
                 </span>
                 <textarea
                   v-if="field[2] === 'textarea'"
@@ -741,14 +993,14 @@ function toggleCase(ci) {
                   rows="3"
                   class="w-full rounded-lg border px-3 py-2 text-sm leading-relaxed outline-none transition-colors focus:ring-2 resize-y"
                   :class="fieldInputClass(field[0])"
-                  placeholder="待补充"
+                  placeholder="【待补充】"
                 />
                 <input
                   v-else
                   v-model="editableDocFields[field[0]]"
                   class="w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:ring-2"
                   :class="fieldInputClass(field[0])"
-                  placeholder="待补充"
+                  placeholder="【待补充】"
                 />
               </label>
             </div>
@@ -763,7 +1015,105 @@ function toggleCase(ci) {
       </div>
 
       <!-- 案情分析：按三级标题分块 -->
-      <div v-else-if="intent === 'analysis'" class="space-y-3">
+      <div v-else-if="hasAnalysisView" class="space-y-3">
+        <section
+          v-if="hasStructuredAnalysis"
+          class="bg-white rounded-2xl rounded-tl-md px-5 py-4 text-sm border border-blue-100 shadow-sm space-y-4"
+        >
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-xs font-semibold text-blue-600">结构化案情分析</span>
+                <span v-if="structuredAnalysis.case_type" class="px-2 py-0.5 rounded-md bg-gray-100 text-[11px] font-medium text-gray-600">
+                  {{ structuredAnalysis.case_type }}
+                </span>
+              </div>
+              <p v-if="structuredAnalysis.case_summary" class="mt-1 text-gray-700 leading-relaxed">
+                {{ structuredAnalysis.case_summary }}
+              </p>
+              <div v-if="structuredAnalysis.legal_relationships.length" class="mt-2 flex flex-wrap gap-1.5">
+                <span class="px-2 py-0.5 rounded-md bg-white text-[11px] font-medium text-gray-500 ring-1 ring-gray-200">法律关系</span>
+                <span
+                  v-for="item in shortList(structuredAnalysis.legal_relationships, 4)"
+                  :key="item"
+                  class="px-2 py-0.5 rounded-md bg-blue-50 text-[11px] font-medium text-blue-600 ring-1 ring-blue-100"
+                >
+                  {{ item }}
+                </span>
+              </div>
+            </div>
+            <span class="shrink-0 px-2 py-1 rounded-md text-xs font-semibold ring-1" :class="riskLevelInfo.className">
+              风险 {{ riskLevelInfo.label }}
+            </span>
+          </div>
+
+          <div v-if="structuredAnalysis.claims.length" class="grid gap-2">
+            <div class="text-xs font-semibold text-gray-600">争议焦点 / Claims</div>
+            <article
+              v-for="(claim, ci) in structuredAnalysis.claims.slice(0, 4)"
+              :key="`${claim.claim}-${ci}`"
+              class="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2.5"
+            >
+              <div class="flex flex-wrap items-center gap-1.5">
+                <span class="font-medium text-gray-800">{{ claim.claim }}</span>
+                <span v-if="claim.domain" class="px-1.5 py-0.5 rounded bg-white text-[11px] text-gray-500 ring-1 ring-gray-100">
+                  {{ claim.domain }}
+                </span>
+              </div>
+              <div v-if="claim.basis.length" class="mt-1 text-xs text-gray-500 leading-relaxed">
+                依据：{{ claim.basis.slice(0, 2).map(b => [b.law_name, b.article_no].filter(Boolean).join(' ')).filter(Boolean).join('、') }}
+              </div>
+              <div v-if="claim.supporting_facts.length" class="mt-1 text-xs text-emerald-700 leading-relaxed">
+                支持事实：{{ shortList(claim.supporting_facts, 3).join('、') }}
+              </div>
+              <div v-if="claimEvidenceGap(claim).length" class="mt-1 text-xs text-amber-700 leading-relaxed">
+                证据缺口：{{ claimEvidenceGap(claim).join('、') }}
+              </div>
+              <div v-if="claim.risks.length" class="mt-1 text-xs text-gray-500 leading-relaxed">
+                风险：{{ shortList(claim.risks, 2).join('、') }}
+              </div>
+            </article>
+          </div>
+
+          <div class="grid gap-2 sm:grid-cols-2">
+            <div v-if="structuredAnalysis.evidence_checklist.length" class="rounded-xl bg-blue-50 border border-blue-100 px-3 py-2.5">
+              <div class="text-xs font-semibold text-blue-700">证据清单</div>
+              <ul class="mt-1 space-y-1 text-xs text-blue-800">
+                <li v-for="item in shortList(structuredAnalysis.evidence_checklist, 6)" :key="item">
+                  - {{ item }}
+                </li>
+              </ul>
+            </div>
+            <div v-if="structuredAnalysis.missing_information.length" class="rounded-xl bg-amber-50 border border-amber-100 px-3 py-2.5">
+              <div class="text-xs font-semibold text-amber-700">缺失信息</div>
+              <ul class="mt-1 space-y-1 text-xs text-amber-800">
+                <li v-for="item in shortList(structuredAnalysis.missing_information, 6)" :key="item">
+                  - {{ item }}
+                </li>
+              </ul>
+            </div>
+            <div v-if="structuredAnalysis.next_actions.length" class="rounded-xl bg-emerald-50 border border-emerald-100 px-3 py-2.5">
+              <div class="text-xs font-semibold text-emerald-700">下一步</div>
+              <ul class="mt-1 space-y-1 text-xs text-emerald-800">
+                <li v-for="item in shortList(structuredAnalysis.next_actions, 4)" :key="item">
+                  - {{ item }}
+                </li>
+              </ul>
+            </div>
+            <div v-if="structuredAnalysis.document_suggestions.length" class="rounded-xl bg-gray-50 border border-gray-100 px-3 py-2.5">
+              <div class="text-xs font-semibold text-gray-600">可生成文书</div>
+              <div class="mt-1 flex flex-wrap gap-1.5">
+                <span
+                  v-for="item in shortList(structuredAnalysis.document_suggestions, 4)"
+                  :key="item"
+                  class="px-2 py-0.5 rounded-md bg-white text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-100"
+                >
+                  {{ item }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
         <section
           v-for="(section, sectionIndex) in analysisSections"
           :key="sectionIndex"

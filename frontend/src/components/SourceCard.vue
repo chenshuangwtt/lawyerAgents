@@ -35,6 +35,8 @@ function normalizeSource(source, index) {
   const lawName = raw.law_name || legacy.law_name || raw.source || '未知来源'
   const articleNo = raw.article_no || raw.article || legacy.article_no || raw.metadata?.article || ''
   const text = sourceText(raw)
+  const sourceLevel = raw.source_level || raw.metadata?.source_level || raw.level || ''
+  const authorityWeight = raw.authority_weight ?? raw.metadata?.authority_weight ?? ''
   return {
     id: raw.source_id || `${lawName}-${articleNo}-${index}`,
     source_type: raw.source_type || raw.metadata?.source_type || 'unknown',
@@ -45,6 +47,8 @@ function normalizeSource(source, index) {
     text,
     snippet: text ? text.slice(0, 220) : '暂无片段',
     confidence: raw.confidence ?? '',
+    source_level: sourceLevel,
+    authority_weight: authorityWeight,
     file_path: raw.file_path || raw.metadata?.file_path || '',
   }
 }
@@ -77,6 +81,26 @@ function confidenceClass(value) {
   if (value === 'suggested') return 'bg-violet-50 text-violet-700 ring-violet-200'
   return 'bg-gray-50 text-gray-500 ring-gray-200'
 }
+
+function sourceLevelLabel(value) {
+  if (!value) return ''
+  const labels = {
+    national_law: '国家法律',
+    administrative_regulation: '行政法规',
+    judicial_interpretation: '司法解释',
+    department_rule: '部门规章',
+    local_rule: '地方规范',
+    case: '案例参考',
+  }
+  return labels[value] || String(value)
+}
+
+function authorityWeightLabel(value) {
+  if (value === null || value === undefined || value === '') return ''
+  const n = Number(value)
+  if (Number.isFinite(n)) return n.toFixed(n >= 10 ? 0 : 2)
+  return String(value)
+}
 </script>
 
 <template>
@@ -93,7 +117,7 @@ function confidenceClass(value) {
       <article
         v-for="card in cards"
         :key="card.id"
-        class="rounded-xl border border-gray-200 bg-white px-3 py-3 shadow-sm"
+        class="rounded-xl border border-gray-200 bg-white px-3 py-3 shadow-sm transition-colors hover:border-blue-200"
       >
         <div class="flex flex-wrap items-start gap-2">
           <a
@@ -119,6 +143,12 @@ function confidenceClass(value) {
         <div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-gray-500">
           <span v-if="card.article_no" class="rounded bg-blue-50 px-1.5 py-0.5 font-medium text-blue-600">{{ card.article_no }}</span>
           <span v-if="card.clause_no" class="rounded bg-blue-50 px-1.5 py-0.5 font-medium text-blue-600">{{ card.clause_no }}</span>
+          <span v-if="sourceLevelLabel(card.source_level)" class="rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700">
+            {{ sourceLevelLabel(card.source_level) }}
+          </span>
+          <span v-if="authorityWeightLabel(card.authority_weight)" class="rounded bg-gray-50 px-1.5 py-0.5 font-medium text-gray-500 ring-1 ring-gray-100">
+            权重 {{ authorityWeightLabel(card.authority_weight) }}
+          </span>
           <span v-if="card.title && card.title !== card.law_name" class="min-w-0 truncate">{{ card.title }}</span>
         </div>
 

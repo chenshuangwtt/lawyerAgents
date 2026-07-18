@@ -86,6 +86,27 @@ function parseCaseState(value) {
   return typeof value === 'object' && !Array.isArray(value) ? value : null
 }
 
+function documentResultFromDone(data) {
+  if (!data || typeof data !== 'object') return null
+  if (data.document_result) return data.document_result
+  if (!data.document_markdown && !data.extracted_fields && !data.missing_fields && !data.document_type) return null
+  const missingFields = data.missing_fields || []
+  return {
+    status: missingFields.length ? 'need_more_info' : 'ready',
+    document_type: data.document_type || data.doc_type || '',
+    extracted_fields: data.extracted_fields || {},
+    form_fields: data.extracted_fields || {},
+    missing_fields: missingFields,
+    missing_field_details: data.missing_field_details || [],
+    clarification_questions: data.clarification_questions || [],
+    document_markdown: data.document_markdown || '',
+    draft_markdown: data.document_markdown || '',
+    can_export: Boolean(data.can_export),
+    field_status: data.field_status || {},
+    field_slots: data.field_slots || [],
+  }
+}
+
 // --- 智能滚动 ---
 function chatEl() { return document.getElementById('chat-list') }
 
@@ -177,7 +198,9 @@ async function onSend() {
     cached: false,
     intent: '',
     case_state: null,
+    analysis_result: null,
     document_result: null,
+    document_type: '',
     missing_fields: [],
     clarification_questions: [],
     document_markdown: '',
@@ -223,6 +246,10 @@ async function onSend() {
           if (data.case_state) {
             msg.case_state = parseCaseState(data.case_state)
           }
+          if (data.analysis_result) {
+            msg.analysis_result = data.analysis_result
+            msg.intent = msg.intent || 'analysis'
+          }
           if (data.record_id) msg.record_id = data.record_id
           // 法条就绪后立即解锁输入框（案情提取可能还在后台进行）
           msg.streaming = false
@@ -250,8 +277,14 @@ async function onSend() {
           if (data.case_state) {
             msg.case_state = parseCaseState(data.case_state)
           }
+          if (data.analysis_result) {
+            msg.analysis_result = data.analysis_result
+            msg.intent = msg.intent || 'analysis'
+          }
           if (data.record_id) msg.record_id = data.record_id
-          if (data.document_result) msg.document_result = data.document_result
+          const documentResult = documentResultFromDone(data)
+          if (documentResult) msg.document_result = documentResult
+          if (data.document_type || data.doc_type) msg.document_type = data.document_type || data.doc_type
           if (data.missing_fields) msg.missing_fields = data.missing_fields
           if (data.clarification_questions) msg.clarification_questions = data.clarification_questions
           if (data.document_markdown || data.document_result?.document_markdown) {
@@ -319,6 +352,7 @@ function onGenerateDocument({ document_type, doc_type, action, source, case_anal
     intent: 'document',
     case_state: null,
     document_result: null,
+    document_type: resolvedType,
     missing_fields: [],
     clarification_questions: [],
     document_markdown: '',
@@ -375,7 +409,9 @@ function onGenerateDocument({ document_type, doc_type, action, source, case_anal
           msg.sources = data.sources || []
           msg.risk_warning = data.risk_warning || ''
           msg.case_state = parseCaseState(data.case_state) || case_state || null
-          if (data.document_result) msg.document_result = data.document_result
+          const documentResult = documentResultFromDone(data)
+          if (documentResult) msg.document_result = documentResult
+          if (data.document_type || data.doc_type) msg.document_type = data.document_type || data.doc_type
           if (data.missing_fields) msg.missing_fields = data.missing_fields
           if (data.clarification_questions) msg.clarification_questions = data.clarification_questions
           if (data.document_markdown || data.document_result?.document_markdown) {
@@ -525,7 +561,9 @@ watch(() => input.value, () => nextTick(adjustHeight))
           :substeps="msg.substeps"
           :intent="msg.intent"
           :case_state="msg.case_state"
+          :analysis_result="msg.analysis_result"
           :document_result="msg.document_result"
+          :document_type="msg.document_type"
           :document_markdown="msg.document_markdown"
           :missing_fields="msg.missing_fields"
           :clarification_questions="msg.clarification_questions"
