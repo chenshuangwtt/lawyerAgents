@@ -35,8 +35,6 @@ def test_document_stream_need_more_info_returns_frontend_friendly_missing_fields
 
     assert done["status"] == "need_more_info"
     assert "applicant_name" in done["missing_fields"]
-    assert "applicant_phone" in done["missing_fields"]
-    assert "respondent_address" in done["missing_fields"]
     assert "申请人姓名" in done["missing_field_names"]
     assert done["clarification_questions"]
     assert len(done["clarification_questions"]) <= 3
@@ -51,6 +49,8 @@ def test_document_stream_need_more_info_returns_frontend_friendly_missing_fields
     assert pending["extracted_fields"]["monthly_salary"] == "8000元"
     assert pending["missing_fields"] == done["missing_fields"]
     assert pending["missing_field_names"] == done["missing_field_names"]
+    assert "applicant_phone" in done["document_result"]["advisory_missing_fields"]
+    assert "respondent_address" in done["document_result"]["advisory_missing_fields"]
 
     clear_pending_document(session_id)
 

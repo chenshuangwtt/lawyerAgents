@@ -26,11 +26,11 @@ def test_labor_document_missing_fields_from_analysis_case():
     assert result["display_modes"] == ["form", "preview"]
     assert result["form_fields"]["monthly_salary"] == "8000元"
     assert "applicant_name" in result["missing_fields"]
-    assert "applicant_phone" in result["missing_fields"]
     assert "respondent_name" in result["missing_fields"]
-    assert "respondent_address" in result["missing_fields"]
     assert "employment_start_date" in result["missing_fields"]
     assert "monthly_salary" not in result["missing_fields"]
+    assert "applicant_phone" in result["advisory_missing_fields"]
+    assert "respondent_address" in result["advisory_missing_fields"]
     assert "申请人姓名" in result["missing_field_names"]
     assert "被申请人公司名称" in result["missing_field_names"]
     assert result["missing_field_details"][0]["display_name"]
@@ -130,6 +130,45 @@ def test_labor_document_success_after_supplement():
     assert result["draft"]["can_export"] is True
 
 
+def test_labor_document_ready_with_contact_and_address_as_advisory_missing():
+    result = build_labor_document_result(
+        "申请人张三，被申请人是北京星河科技有限公司，"
+        "2022年3月1日入职，2024年4月30日被公司书面解除，月工资8000元。"
+        "公司一直没有签劳动合同，也没有支付经济补偿。我有工资流水和解除通知。"
+    )
+
+    assert result["status"] == "ready"
+    assert result["missing_fields"] == []
+    assert result["can_export"] is True
+    assert result["document_markdown"]
+    assert "applicant_phone" in result["advisory_missing_fields"]
+    assert "respondent_address" in result["advisory_missing_fields"]
+    assert "| 联系电话 | 【待补充】 |" in result["document_markdown"]
+    assert "| 住所 | 【待补充】 |" in result["document_markdown"]
+
+
+def test_labor_document_second_round_ready_without_fabricating_contact_or_address():
+    first_round = build_labor_document_result(
+        "我上个月被公司口头辞退，没签劳动合同，工资每月7000元，想准备劳动仲裁申请书。"
+    )
+
+    result = build_labor_document_result(
+        "补充：申请人陈明，被申请人南京北辰信息科技有限公司，"
+        "2022年5月8日入职，2024年5月31日被口头辞退，月工资7000元，有工资流水和微信聊天记录。",
+        existing_fields=first_round["extracted_fields"],
+    )
+
+    assert result["status"] == "ready"
+    assert result["missing_fields"] == []
+    assert result["extracted_fields"]["applicant_name"] == "陈明"
+    assert result["extracted_fields"]["respondent_name"] == "南京北辰信息科技有限公司"
+    assert result["extracted_fields"]["applicant_phone"] == ""
+    assert result["extracted_fields"]["respondent_address"] == ""
+    assert "applicant_phone" in result["advisory_missing_fields"]
+    assert "respondent_address" in result["advisory_missing_fields"]
+    assert "申请人：陈明" in result["document_markdown"]
+
+
 def test_labor_document_merges_second_round_oral_dismissal_date():
     first_round = build_labor_document_result(
         "我在公司工作两年，没有签劳动合同，上个月被口头辞退，月工资8000，公司没给补偿。"
@@ -202,10 +241,10 @@ def test_labor_document_direct_entry_starts_with_missing_fields():
 
     assert result["status"] == "need_more_info"
     assert "applicant_name" in result["missing_fields"]
-    assert "applicant_phone" in result["missing_fields"]
     assert "respondent_name" in result["missing_fields"]
-    assert "respondent_address" in result["missing_fields"]
     assert "employment_start_date" in result["missing_fields"]
+    assert "applicant_phone" in result["advisory_missing_fields"]
+    assert "respondent_address" in result["advisory_missing_fields"]
     assert "申请人姓名" in result["missing_field_names"]
 
 

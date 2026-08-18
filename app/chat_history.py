@@ -9,6 +9,7 @@
 import json
 import os
 import threading
+import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -40,6 +41,9 @@ _sqlite_conn = None
 
 # PostgreSQL 状态
 _pg_pool = None
+
+SQLITE_LOCK_RETRY_ATTEMPTS = 3
+SQLITE_LOCK_RETRY_DELAY_SECONDS = 0.15
 
 
 # --- 连接管理 ---
@@ -103,6 +107,11 @@ def init_db():
     _get_conn()
 
 
+def _is_sqlite_lock_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
 # --- 查询适配层 ---
 
 def _ph(is_pg: bool) -> str:
@@ -158,12 +167,25 @@ def save_record(session_id: str, question: str, answer: str, sources: List[Dict[
                 _put_pg_conn(conn)
         else:
             conn = _get_sqlite_conn()
-            cursor = conn.execute(
-                "INSERT INTO chat_history (session_id, question, answer, sources, domain, case_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (session_id, question, answer, sources_json, domain, case_state, now),
-            )
-            conn.commit()
-            return cursor.lastrowid
+            import sqlite3
+            for attempt in range(SQLITE_LOCK_RETRY_ATTEMPTS):
+                try:
+                    cursor = conn.execute(
+                        "INSERT INTO chat_history (session_id, question, answer, sources, domain, case_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (session_id, question, answer, sources_json, domain, case_state, now),
+                    )
+                    conn.commit()
+                    return cursor.lastrowid
+                except sqlite3.OperationalError as exc:
+                    if not _is_sqlite_lock_error(exc) or attempt == SQLITE_LOCK_RETRY_ATTEMPTS - 1:
+                        raise
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    time.sleep(SQLITE_LOCK_RETRY_DELAY_SECONDS * (attempt + 1))
+
+            raise RuntimeError("unreachable sqlite save retry state")
 
 
 def get_sessions() -> List[Dict[str, Any]]:

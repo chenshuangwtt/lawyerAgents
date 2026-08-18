@@ -136,9 +136,7 @@ DOCUMENT_SCHEMA_FIELDS = [
 
 BLOCKING_REQUIRED_FIELDS = [
     "applicant_name",
-    "applicant_phone",
     "respondent_name",
-    "respondent_address",
     "employment_start_date",
     "monthly_salary",
     "arbitration_claims",

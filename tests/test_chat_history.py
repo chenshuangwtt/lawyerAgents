@@ -3,6 +3,7 @@
 import pytest
 import os
 import shutil
+import sqlite3
 import threading
 import uuid
 from pathlib import Path
@@ -82,6 +83,52 @@ class TestSaveAndGetRecords:
         assert get_last_case_state(session_id) == case_state
         assert records[0]["sources"][0]["law_name"] == "中华人民共和国劳动合同法"
         assert records[0]["sources"][0]["source_type"] == "statute"
+
+    def test_save_record_retries_transient_sqlite_lock(self, monkeypatch):
+        import app.chat_history as ch
+
+        class Cursor:
+            lastrowid = 42
+
+        class LockedThenOkConnection:
+            def __init__(self):
+                self.execute_calls = 0
+                self.commit_calls = 0
+                self.rollback_calls = 0
+
+            def execute(self, *_args, **_kwargs):
+                self.execute_calls += 1
+                if self.execute_calls == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return Cursor()
+
+            def commit(self):
+                self.commit_calls += 1
+
+            def rollback(self):
+                self.rollback_calls += 1
+
+            def close(self):
+                pass
+
+        conn = LockedThenOkConnection()
+        monkeypatch.setattr(ch, "USE_PG", False)
+        ch._sqlite_conn = conn
+        monkeypatch.setattr(ch.time, "sleep", lambda _seconds: None)
+
+        record_id = ch.save_record(
+            session_id="locked-once",
+            question="Q",
+            answer="A",
+            sources=[],
+            domain="劳动",
+            case_state='{"case_type":"劳动争议"}',
+        )
+
+        assert record_id == 42
+        assert conn.execute_calls == 2
+        assert conn.rollback_calls == 1
+        assert conn.commit_calls == 1
 
     def test_multiple_records_ordered(self):
         from app.chat_history import save_record, get_session_records
